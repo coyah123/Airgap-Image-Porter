@@ -795,6 +795,24 @@ class App(tk.Tk):
         vsb = ttk.Scrollbar(tab, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         self.img_tree = tree
+        # Fill the Quick-tag source box when a row is clicked.
+        tree.bind("<<TreeviewSelect>>", self._on_image_select)
+
+        # --- quick tag: retag ONE image from current → new (runs immediately) ---
+        qt = ttk.LabelFrame(tab, text="Quick tag (click an image to fill 'current')",
+                            padding=8)
+        qt.pack(fill="x", pady=(6, 0))
+        ttk.Label(qt, text="Current:").pack(side="left")
+        self.qtag_src_var = tk.StringVar()
+        ttk.Entry(qt, textvariable=self.qtag_src_var, width=36).pack(side="left", padx=4)
+        ttk.Label(qt, text="→  New:").pack(side="left")
+        self.qtag_dst_var = tk.StringVar()
+        qdst = ttk.Entry(qt, textvariable=self.qtag_dst_var, width=36)
+        qdst.pack(side="left", padx=4)
+        qdst.bind("<Return>", lambda _e: self._quick_tag())
+        qb = ttk.Button(qt, text="🏷️ Tag", style="Accent.TButton", command=self._quick_tag)
+        qb.pack(side="left", padx=(6, 0))
+        self._action_btns.append(qb)
 
         # --- mass re-prefix controls ---
         box = ttk.LabelFrame(tab, text="Mass re-tag selected images with a new prefix",
@@ -802,9 +820,12 @@ class App(tk.Tk):
         box.pack(fill="x", pady=(6, 0))
         row1 = ttk.Frame(box)
         row1.pack(fill="x")
-        ttk.Label(row1, text="New prefix:").pack(side="left")
+        ttk.Label(row1, text="Registry prefix:").pack(side="left")
         self.prefix_var = tk.StringVar(value="myacr.azurecr.io")
-        ttk.Entry(row1, textvariable=self.prefix_var, width=34).pack(side="left", padx=4)
+        ttk.Entry(row1, textvariable=self.prefix_var, width=28).pack(side="left", padx=4)
+        ttk.Label(row1, text="Add path prefix:").pack(side="left", padx=(8, 0))
+        self.add_prefix_var = tk.StringVar(value="")
+        ttk.Entry(row1, textvariable=self.add_prefix_var, width=20).pack(side="left", padx=4)
         self.keep_old_reg_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(row1, text="keep old registry in path",
                         variable=self.keep_old_reg_var).pack(side="left", padx=6)
@@ -862,10 +883,11 @@ class App(tk.Tk):
             self._notify("Select one or more images first.", "warn")
             return
         prefix = self.prefix_var.get()
+        add = self.add_prefix_var.get()
         keep = self.keep_old_reg_var.get()
         self._log("── re-tag preview ──")
         for ref in refs:
-            self._log(f"  {ref}  →  {docker_ops.reprefix(ref, prefix, keep)}")
+            self._log(f"  {ref}  →  {docker_ops.reprefix(ref, prefix, keep, add)}")
 
     def _reprefix_selected(self, push: bool):
         refs = self._selected_refs()
@@ -876,14 +898,43 @@ class App(tk.Tk):
         if not prefix:
             self._notify("Enter a new prefix.", "warn")
             return
+        add = self.add_prefix_var.get().strip()
         keep = self.keep_old_reg_var.get()
         steps = []
         for ref in refs:
-            dst = docker_ops.reprefix(ref, prefix, keep)
+            dst = docker_ops.reprefix(ref, prefix, keep, add)
             steps.append((f"tag {ref} → {dst}", docker_ops.tag_argv(ref, dst), None))
             if push:
                 steps.append((f"push {dst}", docker_ops.push_argv(dst), None))
         self._start(steps, after=self._refresh_images)
+
+    def _on_image_select(self, _e=None):
+        """When a row is clicked, prefill the Quick-tag 'current' box with its ref."""
+        refs = self._selected_refs()
+        if refs:
+            self.qtag_src_var.set(refs[0])
+
+    def _quick_tag(self):
+        """Retag a single image current → new, immediately (no plan gate)."""
+        src = self.qtag_src_var.get().strip()
+        dst = self.qtag_dst_var.get().strip()
+        if not src:
+            self._notify("Click an image (or type its current tag) first.", "warn")
+            return
+        if not dst:
+            self._notify("Enter the new tag in the 'New' box.", "warn")
+            return
+        if src == dst:
+            self._notify("Current and new tags are the same.", "warn")
+            return
+        self._run_now([(f"tag {src} → {dst}", docker_ops.tag_argv(src, dst), None)],
+                      after=self._quick_tag_done)
+
+    def _quick_tag_done(self):
+        if not getattr(self, "_last_job_failed", False):
+            self._notify(f"Tagged → {self.qtag_dst_var.get().strip()}", "ok")
+            self.qtag_dst_var.set("")
+        self._refresh_images()
 
     def _push_selected(self):
         refs = [r for r in self._selected_refs() if ":" in r or "/" in r]

@@ -162,22 +162,32 @@ def split_ref(ref: str) -> tuple[str, str, str, str]:
     return registry, m.group("name"), m.group("tag") or "", m.group("digest") or ""
 
 
-def reprefix(ref: str, new_prefix: str, keep_old_registry: bool = False) -> str:
-    """Swap (or prepend) the registry prefix on an image ref, keeping repo+tag.
+def reprefix(ref: str, new_prefix: str, keep_old_registry: bool = False,
+             add_prefix: str = "") -> str:
+    """Rewrite an image ref's prefix, keeping repo+tag.
 
-    This is the mass-retag primitive: pull from one registry, change where the
-    images *say* they came from, then push to the new place.
+    Two independent knobs:
+      * `new_prefix`  — the registry prefix (the host, maybe with a namespace).
+      * `add_prefix`  — an extra path segment inserted AFTER the registry and
+                        BEFORE the repo path (e.g. a vendor folder like
+                        "pulledfromvendor" or "ironbank").
 
-    reprefix("oldacr.azurecr.io/app/api:v2", "newacr.azurecr.io")
-        -> "newacr.azurecr.io/app/api:v2"                 (registry swapped)
-    reprefix("oldacr.azurecr.io/app/api:v2", "mirror.io", keep_old_registry=True)
-        -> "mirror.io/oldacr.azurecr.io/app/api:v2"        (old path preserved)
+    reprefix("ingress-nginx/nginx:v1", "registry")
+        -> "registry/ingress-nginx/nginx:v1"                  (registry swapped)
+    reprefix("ingress-nginx/nginx:v1", "registry", add_prefix="pulledfromvendor")
+        -> "registry/pulledfromvendor/ingress-nginx/nginx:v1" (added path segment)
+    reprefix("oldacr.io/app/api:v2", "mirror.io", keep_old_registry=True)
+        -> "mirror.io/oldacr.io/app/api:v2"                   (old path preserved)
 
-    `new_prefix` may itself include a namespace segment (e.g. "newacr.azurecr.io/team").
+    `new_prefix` and `add_prefix` may each include multiple slash-separated
+    segments; surrounding slashes are trimmed.
     """
-    new_prefix = (new_prefix or "").strip().rstrip("/")
+    new_prefix = (new_prefix or "").strip().strip("/")
+    add_prefix = (add_prefix or "").strip().strip("/")
     registry, repo, tag, _digest = split_ref(ref)
     path = f"{registry}/{repo}" if (keep_old_registry and registry) else repo
+    if add_prefix:
+        path = f"{add_prefix}/{path}"
     out = f"{new_prefix}/{path}" if new_prefix else path
     if tag and tag != "<none>":
         out += f":{tag}"
