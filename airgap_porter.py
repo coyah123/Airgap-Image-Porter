@@ -1333,6 +1333,14 @@ class App(tk.Tk):
         ttk.Button(dest, text="Browse…", command=lambda: self._browse_into(
             self.chartdir_var)).pack(side="left")
 
+        # How to save a pulled chart: keep the .tgz archive, or untar it into a
+        # <name>/ directory tree under the charts folder.
+        optrow = ttk.Frame(tab)
+        optrow.pack(fill="x", pady=(4, 0))
+        self.chart_untar_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(optrow, text="Untar into a folder instead of keeping the .tgz",
+                        variable=self.chart_untar_var).pack(side="left")
+
         act = ttk.Frame(tab)
         act.pack(fill="x", pady=(8, 0))
         for text, cmd in (("⬇ Pull chart(s)", self._pull_charts),
@@ -1436,10 +1444,18 @@ class App(tk.Tk):
         except OSError as e:
             self._notify(f"Charts folder error: {e}", "error")
             return
+        untar = self.chart_untar_var.get()
         steps = []
         for r in sel:
-            steps.append((f"pull {r['chart']} {r['version']} → {helm_ops.tgz_name(r['chart'], r['version'])}",
-                          helm_ops.pull_argv(r["chart"], r["version"], dest), None))
+            if untar:
+                name = r["chart"].split("/", 1)[-1]
+                label = f"pull {r['chart']} {r['version']} → {name}/ (untarred)"
+            else:
+                label = (f"pull {r['chart']} {r['version']} → "
+                         f"{helm_ops.tgz_name(r['chart'], r['version'])}")
+            steps.append((label,
+                          helm_ops.pull_argv(r["chart"], r["version"], dest, untar=untar),
+                          None))
         self._start(steps, after=self._refresh_files)
 
     def _list_chart_images(self):

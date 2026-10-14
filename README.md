@@ -86,8 +86,11 @@ paths), alongside the saved login and environment profiles.
   need to type a keyword first.
 - **Search** — `helm search repo <kw> --versions`; lists every chart version with
   its app version and description.
-- **Pull chart(s)** — downloads the selected versions as `.tgz` into the charts
-  folder (a `.tgz` is already a gzipped tar, ready for transport).
+- **Pull chart(s)** — downloads the selected versions into the charts folder (set
+  it with the field + **Browse…**). By default each is saved as a `.tgz` (already
+  a gzipped tar, ready for transport); tick **Untar into a folder instead of
+  keeping the .tgz** to have helm extract each chart into a `<name>/` directory
+  tree instead (`helm pull --untar --untardir`).
 - **List images in selected** — renders the chart (`helm template`) and extracts
   the container images it references, then adds them to the **Pull & Save** list
   so you can pull those for your target platform too.

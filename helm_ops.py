@@ -83,17 +83,25 @@ def parse_search(out: str) -> list[dict]:
 
 
 # --- pulling ----------------------------------------------------------------
-def pull_argv(chart: str, version: str, dest: str) -> list[str]:
+def pull_argv(chart: str, version: str, dest: str, untar: bool = False) -> list[str]:
     """`helm pull <chart> --version <v> -d <dest>` argv.
 
     `chart` is either "<repo>/<name>" (classic repo) or an "oci://…" reference.
-    helm writes a `<name>-<version>.tgz` into `dest` — already a gzipped tar,
-    ready to carry across the air gap.
+    By default helm writes a `<name>-<version>.tgz` into `dest` — already a
+    gzipped tar, ready to carry across the air gap.
+
+    With `untar=True`, helm instead extracts the chart into `dest` as a
+    `<name>/` directory tree (`--untar --untardir <dest>`), for when you want
+    the unpacked files rather than the archive.
     """
     argv = ["helm", "pull", chart]
     if version:
         argv += ["--version", version]
-    if dest:
+    if untar:
+        argv.append("--untar")
+        if dest:
+            argv += ["--untardir", dest]
+    elif dest:
         argv += ["-d", dest]
     return argv
 
