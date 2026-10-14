@@ -22,6 +22,9 @@ images won't start. This tool makes the target platform **explicit** on every pu
    process table. Leave *Registry* blank for Docker Hub. Saved logins can be
    recalled from the dropdown; **✎ Rename** renames the selected one in place
    (type the new name in the *Name* box first) rather than saving a duplicate.
+   Saved **environment sets** and **prefix targets** have the same ✎ Rename.
+   The Docker/registry connection details at the top collapse with **▾ Hide
+   details** (and auto-collapse once a registry login succeeds) to reclaim space.
 2. **Pull & Save tab** (internet-connected machine):
    - Choose the **target platform** (`linux/amd64` default).
    - Paste your image list (one per line; `#` comments and blank lines ignored),

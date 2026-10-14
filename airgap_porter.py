@@ -222,20 +222,38 @@ class App(tk.Tk):
         self.docker_status_lbl.pack(side="left", padx=(6, 0))
         self.docker_detail_lbl = ttk.Label(row1, text="", foreground="#777")
         self.docker_detail_lbl.pack(side="left", padx=(12, 0))
+        # Toggle to collapse the connection details (they auto-collapse once a
+        # registry login succeeds, since they just take up space after that).
+        self.status_toggle_btn = ttk.Button(row1, text="▾ Hide details", width=14,
+                                             command=self._toggle_status_details)
+        self.status_toggle_btn.pack(side="right")
+
+        # Everything below lives in a collapsible body so it can be hidden.
+        self.status_body = ttk.Frame(bar, style="Status.TFrame")
+        self.status_body.pack(fill="x")
 
         # Registry connection indicators (reflect the last login this session):
         # one for Docker/OCI registries, one for Helm registries. Red until a
         # login succeeds, then green with the registry host.
         self.reg_dot, self.reg_lbl = self._make_conn_row(
-            bar, "Docker registry")
+            self.status_body, "Docker registry")
         self.helm_reg_dot, self.helm_reg_lbl = self._make_conn_row(
-            bar, "Helm registry")
+            self.status_body, "Helm registry")
 
-        row2 = ttk.Frame(bar, style="Status.TFrame")
+        row2 = ttk.Frame(self.status_body, style="Status.TFrame")
         row2.pack(fill="x", pady=(6, 0))
         self.docker_refresh_btn = ttk.Button(row2, text="⟳ Refresh",
                                               command=self._refresh_docker_status)
         self.docker_refresh_btn.pack(side="left")
+
+    def _toggle_status_details(self):
+        """Collapse/expand the registry indicators + Refresh row."""
+        if self.status_body.winfo_manager():
+            self.status_body.pack_forget()
+            self.status_toggle_btn.config(text="▸ Show details")
+        else:
+            self.status_body.pack(fill="x")
+            self.status_toggle_btn.config(text="▾ Hide details")
 
     def _make_conn_row(self, parent, prefix: str):
         """A small dot + label row for a registry connection indicator."""
@@ -256,6 +274,12 @@ class App(tk.Tk):
         if ok:
             dot.config(fg="#2e9e44")
             lbl.config(text=f"{prefix}: connected — {target or 'logged in'}")
+            # Once logged in the details are just noise — collapse to reclaim space
+            # (only the first time, so a manual re-open isn't fought on re-login).
+            if not getattr(self, "_status_auto_collapsed", False):
+                self._status_auto_collapsed = True
+                if self.status_body.winfo_manager():
+                    self._toggle_status_details()
         else:
             dot.config(fg="#d33")
             lbl.config(text=f"{prefix}: login failed{(' — ' + target) if target else ''}")
@@ -434,6 +458,7 @@ class App(tk.Tk):
         self.env_name_var = tk.StringVar()
         ttk.Entry(esr, textvariable=self.env_name_var, width=16).pack(side="left", padx=4)
         ttk.Button(esr, text="💾 Save set", command=self._save_env_profile).pack(side="left")
+        ttk.Button(esr, text="✎ Rename", command=self._rename_env_profile).pack(side="left")
 
         self.env_txt = scrolledtext.ScrolledText(self.env_frame, height=5, wrap="none",
                                                   font=("Consolas", 9))
@@ -526,6 +551,22 @@ class App(tk.Tk):
         env_store.upsert(name, text)
         self._reload_env_profiles(select=name)
         self._notify(f"Saved environment set “{name}”.", "ok")
+
+    def _rename_env_profile(self):
+        """Rename the selected environment set to the Name box value (in place)."""
+        old = self.env_profile_var.get().strip()
+        new = self.env_name_var.get().strip()
+        if not old:
+            self._notify("Pick a saved set to rename first.", "warn")
+            return
+        if not new:
+            self._notify("Type the new name in the Name box.", "warn")
+            return
+        if new == old:
+            return
+        env_store.rename(old, new)
+        self._reload_env_profiles(select=new)
+        self._notify(f"Renamed environment set “{old}” → “{new}”.", "ok")
 
     def _delete_env_profile(self):
         name = self.env_profile_var.get().strip()
@@ -1023,6 +1064,7 @@ class App(tk.Tk):
         self.prefix_name_var = tk.StringVar()
         ttk.Entry(prow, textvariable=self.prefix_name_var, width=18).pack(side="left", padx=4)
         ttk.Button(prow, text="💾 Save", command=self._save_prefix_profile).pack(side="left")
+        ttk.Button(prow, text="✎ Rename", command=self._rename_prefix_profile).pack(side="left")
 
         row2 = ttk.Frame(box)
         row2.pack(fill="x", pady=(8, 0))
@@ -1113,6 +1155,22 @@ class App(tk.Tk):
                             self.keep_old_reg_var.get())
         self._reload_prefix_profiles(select=name)
         self._notify(f"Saved prefix target “{name}”.", "ok")
+
+    def _rename_prefix_profile(self):
+        """Rename the selected prefix target to the Name box value (in place)."""
+        old = self.prefix_profile_var.get().strip()
+        new = self.prefix_name_var.get().strip()
+        if not old:
+            self._notify("Pick a saved target to rename first.", "warn")
+            return
+        if not new:
+            self._notify("Type the new name in the Name box.", "warn")
+            return
+        if new == old:
+            return
+        prefix_store.rename(old, new)
+        self._reload_prefix_profiles(select=new)
+        self._notify(f"Renamed prefix target “{old}” → “{new}”.", "ok")
 
     def _delete_prefix_profile(self):
         name = self.prefix_profile_var.get().strip()
