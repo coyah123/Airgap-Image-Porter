@@ -168,6 +168,51 @@ def login_argv(registry: str, username: str) -> list[str]:
     return argv
 
 
+# Clients whose `login` subcommand takes -u/-p and will block on a TTY prompt
+# when the password is omitted. (az/gcloud/aws use token flows — excluded.)
+_LOGIN_BINS = ("docker", "podman", "nerdctl")
+
+
+def _login_tokens(command: str) -> list[str] | None:
+    """Tokenize a login command, or None if it isn't a password-based login.
+
+    Recognizes `docker|podman|nerdctl login …` and `helm registry login …`.
+    Pipelines (the ECR `get-login-password | …` case) are not logins we prompt
+    for — they already feed a password — so a '|' disqualifies the command.
+    """
+    if "|" in command:
+        return None
+    try:
+        toks = shlex.split(command, posix=(sys.platform != "win32"))
+    except ValueError:
+        return None
+    if not toks:
+        return None
+    bin0 = toks[0].lower()
+    is_login = ((bin0 in _LOGIN_BINS and "login" in toks[1:])
+                or (bin0 == "helm" and "registry" in toks and "login" in toks))
+    return toks if is_login else None
+
+
+def login_needs_password(command: str) -> bool:
+    """True if `command` is a login that would block waiting for a password.
+
+    i.e. a recognized login with no -p/--password/--password-stdin already set.
+    """
+    toks = _login_tokens(command)
+    if toks is None:
+        return False
+    return not any(t in ("-p", "--password", "--password-stdin") for t in toks)
+
+
+def login_has_username(command: str) -> bool:
+    """True if a recognized login command already carries a -u/--username."""
+    toks = _login_tokens(command)
+    if toks is None:
+        return False
+    return any(t in ("-u", "--username") for t in toks)
+
+
 def pull_argv(ref: str, platform: str) -> list[str]:
     """`docker pull --platform <p> <ref>` argv."""
     argv = ["docker", "pull"]
@@ -285,19 +330,30 @@ def run_stream(argv, on_line, *, stdin_text: str | None = None) -> int:
     return proc.wait()
 
 
-def run_shell_stream(command: str, on_line) -> int:
+def run_shell_stream(command: str, on_line, *, stdin_text: str | None = None) -> int:
     """Run a full shell `command` string (may contain pipes), streaming output.
 
     Login flows are often pipelines — `aws ecr get-login-password … | docker
     login --password-stdin …` — which an argv list can't express, so these run
     through the system shell (cmd.exe on Windows, /bin/sh elsewhere).
+
+    `stdin_text` (if given) is written to the child's stdin and closed — used to
+    feed a prompted password into `docker login --password-stdin` so it never
+    appears in argv, the process table, or the saved login profile.
     """
     proc = subprocess.Popen(
         command, shell=True,
+        stdin=subprocess.PIPE if stdin_text is not None else None,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1, encoding="utf-8", errors="replace",
         creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
     )
+    if stdin_text is not None:
+        try:
+            proc.stdin.write(stdin_text)
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
     for line in proc.stdout:
         on_line(line.rstrip("\n"))
     proc.stdout.close()

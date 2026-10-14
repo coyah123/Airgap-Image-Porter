@@ -77,9 +77,11 @@ class JobRunner:
                 self._emit("cmd", docker_ops.format_command(argv))
                 try:
                     if isinstance(argv, str):
-                        # A pasted shell command (e.g. a login pipeline).
+                        # A pasted shell command (e.g. a login pipeline). May carry
+                        # a prompted password to feed via --password-stdin.
                         code = docker_ops.run_shell_stream(
-                            argv, lambda ln: self._emit("line", ln))
+                            argv, lambda ln: self._emit("line", ln),
+                            stdin_text=stdin_text)
                     else:
                         code = docker_ops.run_stream(
                             argv, lambda ln: self._emit("line", ln),
@@ -352,8 +354,88 @@ class App(tk.Tk):
         if not cmd:
             messagebox.showwarning("Login", "Paste a login command first.")
             return
+        stdin_text = None
+        # If this is a plain `docker login` with no password, docker would try to
+        # prompt on a TTY we don't have — so ask here and feed it on stdin. The
+        # prompted password is used once and never written to the saved profile.
+        if docker_ops.login_needs_password(cmd):
+            creds = self._prompt_credentials(
+                need_user=not docker_ops.login_has_username(cmd))
+            if creds is None:
+                self._log("Login cancelled.")
+                return
+            user, pw = creds
+            if not pw:
+                messagebox.showwarning("Login", "Password is empty.")
+                return
+            if user:
+                cmd = f'{cmd} -u "{user}"'
+            cmd = f"{cmd} --password-stdin"
+            stdin_text = pw + "\n"
         # Login fetches/sets creds locally — run it directly (not via the plan).
-        self._run_now([("registry login", cmd, None)])
+        self._run_now([("registry login", cmd, stdin_text)], after=self._login_result)
+
+    def _login_result(self):
+        """Explicit pass/fail feedback after a login job finishes."""
+        if getattr(self, "_last_job_failed", False):
+            self._log("✗ Login FAILED — see the output above.")
+            messagebox.showerror("Login failed",
+                                 "Docker rejected the login. Check the registry, "
+                                 "username, and password in the Output pane.")
+        else:
+            self._log("✓ Login succeeded.")
+            messagebox.showinfo("Login", "Login succeeded.")
+
+    def _prompt_credentials(self, need_user: bool):
+        """Modal dialog for a missing username/password. Returns (user, pw) or None.
+
+        The password field is masked and the value is returned only — never
+        stored. Cancel (or closing the window) returns None.
+        """
+        dlg = tk.Toplevel(self)
+        dlg.title("Docker login")
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        frm = ttk.Frame(dlg, padding=14)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text="Enter credentials for this login.\n"
+                  "The password is used once and is never saved.",
+                  foreground="#555").grid(row=0, column=0, columnspan=2,
+                                          sticky="w", pady=(0, 10))
+        user_var, pw_var = tk.StringVar(), tk.StringVar()
+        result = {}
+        r = 1
+        user_entry = None
+        if need_user:
+            ttk.Label(frm, text="Username:").grid(row=r, column=0, sticky="e",
+                                                  padx=(0, 6), pady=3)
+            user_entry = ttk.Entry(frm, textvariable=user_var, width=30)
+            user_entry.grid(row=r, column=1, sticky="we", pady=3)
+            r += 1
+        ttk.Label(frm, text="Password:").grid(row=r, column=0, sticky="e",
+                                              padx=(0, 6), pady=3)
+        pw_entry = ttk.Entry(frm, textvariable=pw_var, width=30, show="•")
+        pw_entry.grid(row=r, column=1, sticky="we", pady=3)
+        r += 1
+        btns = ttk.Frame(frm)
+        btns.grid(row=r, column=0, columnspan=2, sticky="e", pady=(12, 0))
+
+        def _ok():
+            result["user"], result["pw"] = user_var.get().strip(), pw_var.get()
+            dlg.destroy()
+
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(
+            side="right", padx=(6, 0))
+        ttk.Button(btns, text="🔑 Log in", command=_ok,
+                   style="Accent.TButton").pack(side="right")
+        pw_entry.bind("<Return>", lambda _e: _ok())
+        (user_entry or pw_entry).focus_set()
+        self.update_idletasks()
+        dlg.wait_window()
+        if "pw" not in result:
+            return None
+        return result["user"], result["pw"]
 
     # -- Pull & Save tab ----------------------------------------------------
     def _build_pull_tab(self):
@@ -1170,6 +1252,7 @@ class App(tk.Tk):
                     self._log(f"  ✓ {text}")
                 elif kind == "done":
                     self._set_busy(False)
+                    self._last_job_failed = bool(text)
                     if text:
                         self._log(f"\n✗ stopped at: {text}")
                     else:
