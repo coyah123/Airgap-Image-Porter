@@ -36,6 +36,7 @@ from pathlib import Path
 from tkinter import filedialog, scrolledtext, ttk
 
 import docker_ops
+import env_store
 import helm_ops
 import login_store
 
@@ -309,12 +310,13 @@ class App(tk.Tk):
         "# helm registry login registry.example.com -u user --insecure   (extra args pass through)")
 
     _ENV_PLACEHOLDER = (
-        "# Paste credentials / env for THIS session (one per line). The app shells\n"
-        "# out to docker & aws, so these must be set in its environment. Examples:\n"
-        "#   set AWS_ACCESS_KEY_ID=AKIA...            (cmd.exe)\n"
-        "#   $env:AWS_SECRET_ACCESS_KEY=\"...\"          (PowerShell)\n"
-        "#   export AWS_SESSION_TOKEN=...             (bash/zsh)\n"
-        "#   AWS_DEFAULT_REGION=us-east-1")
+        "# Env vars for THIS session (one per line). Save a reusable set with\n"
+        "# '💾 Save set'. A $(...) value is run fresh each time you Apply, so a\n"
+        "# token is never stale and nothing secret is written to disk. Examples:\n"
+        "#   USERNAME=\"00000\"\n"
+        "#   PASSWORD=$(az acr login --name myacr --expose-token --query accessToken -o tsv)\n"
+        "#   AWS_DEFAULT_REGION=us-east-1\n"
+        "#   export AWS_SESSION_TOKEN=...             (export/set/$env: prefixes all OK)")
 
     def _build_login_bar(self):
         f = ttk.LabelFrame(self, text="Registry login", padding=8)
@@ -402,8 +404,24 @@ class App(tk.Tk):
         # see them). Written into os.environ; every later command inherits it. No
         # popup, nothing saved to disk, values never logged.
         self.env_frame = ttk.LabelFrame(
-            self.login_body, text="Session environment / credentials (applied to "
-            "every command; not saved to disk)", padding=6)
+            self.login_body, text="Session environment / credentials "
+            "($(…) values resolved fresh on apply)", padding=6)
+        # Saved env profiles (named sets of assignment lines) — like saved logins.
+        esr = ttk.Frame(self.env_frame)
+        esr.pack(fill="x", pady=(0, 4))
+        ttk.Label(esr, text="Saved set:").pack(side="left")
+        self.env_profile_var = tk.StringVar()
+        self.env_profile_box = ttk.Combobox(esr, textvariable=self.env_profile_var,
+                                            width=22, state="readonly")
+        self.env_profile_box.pack(side="left", padx=4)
+        self.env_profile_box.bind("<<ComboboxSelected>>",
+                                  lambda _e: self._load_env_profile())
+        ttk.Button(esr, text="Delete", command=self._delete_env_profile).pack(side="left")
+        ttk.Label(esr, text="   Name:").pack(side="left")
+        self.env_name_var = tk.StringVar()
+        ttk.Entry(esr, textvariable=self.env_name_var, width=16).pack(side="left", padx=4)
+        ttk.Button(esr, text="💾 Save set", command=self._save_env_profile).pack(side="left")
+
         self.env_txt = scrolledtext.ScrolledText(self.env_frame, height=5, wrap="none",
                                                   font=("Consolas", 9))
         self.env_txt.pack(fill="x")
@@ -419,6 +437,7 @@ class App(tk.Tk):
         self.env_applied_lbl.pack(side="left", padx=10)
         # Hidden until needed.
         self._reload_profiles()
+        self._reload_env_profiles()
 
     def _toggle_login_panel(self):
         """Collapse/expand the login controls to reclaim space after logging in."""
@@ -437,7 +456,11 @@ class App(tk.Tk):
             self.env_txt.focus_set()
 
     def _apply_env(self):
-        """Parse the pasted env lines and write them into this process's os.environ."""
+        """Parse the env lines, resolve any $(…) values, and write to os.environ.
+
+        $(…) resolution shells out (az token fetches, etc.), so it runs on a
+        background thread to keep the UI responsive.
+        """
         try:
             env = docker_ops.parse_env_assignments(self.env_txt.get("1.0", "end"))
         except ValueError as e:
@@ -446,12 +469,63 @@ class App(tk.Tk):
         if not env:
             self._notify("No environment assignments found to apply.", "warn")
             return
-        os.environ.update({k: str(v) for k, v in env.items()})
-        names = ", ".join(sorted(env))   # names only — never log secret values
-        self.env_applied_lbl.config(text=f"applied: {names}")
-        self._notify(f"Applied {len(env)} variable(s) to this session: {names}", "ok")
-        # Creds/DOCKER_HOST may have changed what the daemon check can reach.
-        self._refresh_docker_status()
+        self._notify("Applying environment (resolving any $(…) values)…", "info")
+        threading.Thread(target=self._apply_env_worker, args=(env,),
+                         daemon=True).start()
+
+    def _apply_env_worker(self, env: dict):
+        resolved = {}
+        for k, v in env.items():
+            val, err = docker_ops.resolve_env_value(v)
+            if err:
+                self._status_q.put(("env_err", f"{k}: {err}"))
+                return
+            resolved[k] = val
+        self._status_q.put(("env_ok", resolved))
+
+    def _reload_env_profiles(self, select: str = ""):
+        self._env_profiles = env_store.load()
+        names = [p["name"] for p in self._env_profiles]
+        self.env_profile_box["values"] = names
+        if select and select in names:
+            self.env_profile_var.set(select)
+
+    def _load_env_profile(self):
+        text = env_store.text_for(self.env_profile_var.get())
+        if text:
+            self.env_txt.delete("1.0", "end")
+            self.env_txt.insert("1.0", text)
+            self.env_name_var.set(self.env_profile_var.get())
+
+    def _save_env_profile(self):
+        name = self.env_name_var.get().strip() or self.env_profile_var.get().strip()
+        text = self.env_txt.get("1.0", "end").strip()
+        if not name:
+            self._notify("Give the environment set a name first.", "warn")
+            return
+        if not text:
+            self._notify("Nothing to save — paste some assignments.", "warn")
+            return
+        env_store.upsert(name, text)
+        self._reload_env_profiles(select=name)
+        self._notify(f"Saved environment set “{name}”.", "ok")
+
+    def _delete_env_profile(self):
+        name = self.env_profile_var.get().strip()
+        if not name:
+            return
+        # Two-step confirm (no popup), same as deleting a saved login.
+        if getattr(self, "_env_delete_armed", None) != name:
+            self._env_delete_armed = name
+            self._notify(f"Click Delete again to remove environment set “{name}”.",
+                         "warn")
+            self.after(4000, lambda: setattr(self, "_env_delete_armed", None))
+            return
+        self._env_delete_armed = None
+        env_store.delete(name)
+        self.env_profile_var.set("")
+        self._reload_env_profiles()
+        self._notify(f"Deleted environment set “{name}”.", "ok")
 
     def _login_command_text(self) -> str:
         txt = self.login_cmd.get("1.0", "end")
@@ -1531,6 +1605,15 @@ class App(tk.Tk):
                     self.docker_dot.config(fg="#d33")
                     self.docker_status_lbl.config(text="Docker not available")
                     self.docker_detail_lbl.config(text=detail)
+                elif kind == "env_ok":
+                    os.environ.update({k: str(v) for k, v in detail.items()})
+                    names = ", ".join(sorted(detail))  # names only, never values
+                    self.env_applied_lbl.config(text=f"applied: {names}")
+                    self._notify(f"Applied {len(detail)} variable(s) to this "
+                                 f"session: {names}", "ok")
+                    self._refresh_docker_status()
+                elif kind == "env_err":
+                    self._notify(f"Environment not applied — {detail}", "error")
         except queue.Empty:
             pass
         # Drain the images-list worker too.

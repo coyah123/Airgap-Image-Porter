@@ -83,6 +83,47 @@ def parse_env_assignments(text: str) -> dict:
     return out
 
 
+# A value wrapped in $(...) or `...` is a command substitution: run it and use
+# its stdout as the value. Lets a saved profile carry `PASSWORD=$(az …)` so a
+# fresh token is fetched each time the profile is applied (nothing stale/secret
+# is stored). Matched whole-value only, so a literal value is never executed.
+_CMD_SUBST_RE = re.compile(r"^\$\((?P<a>.*)\)$|^`(?P<b>.*)`$", re.S)
+
+
+def run_shell_capture(command: str) -> tuple[int, str, str]:
+    """Run a shell `command`, returning (exit_code, stdout, stderr) kept separate."""
+    proc = subprocess.run(
+        command, shell=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace",
+        creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def resolve_env_value(value: str, runner=run_shell_capture) -> tuple[str, str]:
+    """Resolve a single env value, returning (resolved_value, error).
+
+    If `value` is a `$(cmd)` / `` `cmd` `` substitution, run the inner command and
+    return its trimmed stdout. Otherwise return `value` unchanged. `error` is ""
+    on success, or a message if the substitution command failed (so the caller
+    can refuse to apply a half-resolved set).
+    """
+    m = _CMD_SUBST_RE.match(value.strip())
+    if not m:
+        return value, ""
+    inner = (m.group("a") or m.group("b") or "").strip()
+    if not inner:
+        return "", ""
+    try:
+        code, out, err = runner(inner)
+    except OSError as e:
+        return "", f"{inner!r}: {e}"
+    if code != 0:
+        return "", f"`{inner}` exited {code}: {err.strip() or out.strip()}"
+    return out.strip(), ""
+
+
 def server_version_argv() -> list[str]:
     """`docker version` of just the *server* — the real "is the daemon up?" test.
 
