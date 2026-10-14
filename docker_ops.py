@@ -12,6 +12,7 @@ Docker CLI (Docker Desktop, colima, Rancher Desktop, or plain dockerd).
 """
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import shutil
@@ -54,6 +55,50 @@ def _strip_env_quotes(val: str) -> str:
     if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
         val = val[1:-1]
     return val
+
+
+# $VAR and ${VAR} references, expanded by us (not the shell) so the same syntax
+# works on cmd.exe, PowerShell, and sh alike. $(…) command substitution is NOT
+# matched here (no letter after '$('), so it's left for resolve_env_value.
+_VAR_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def expand_vars(text: str, env=None) -> str:
+    """Expand $VAR / ${VAR} in `text` from `env` (default os.environ).
+
+    Unknown variables expand to "" (same as a shell). Shell-independent so a
+    login command or env value can use $NAME regardless of the launching shell.
+    """
+    env = os.environ if env is None else env
+    return _VAR_REF_RE.sub(lambda m: str(env.get(m.group(1) or m.group(2), "")), text)
+
+
+def referenced_vars(text: str) -> set:
+    """The set of $VAR / ${VAR} names referenced in `text`."""
+    return {m.group(1) or m.group(2) for m in _VAR_REF_RE.finditer(text)}
+
+
+def extract_password(argv: list[str]):
+    """Pull an inline -p/--password VALUE out of a login argv.
+
+    Returns (argv_without_password, password) with the flag rewritten to
+    --password-stdin, so the password is fed on stdin instead of sitting in the
+    argv/process table/log. Returns (argv, None) if there's no inline password.
+    """
+    out: list[str] = []
+    pw = None
+    skip = False
+    for i, a in enumerate(argv):
+        if skip:
+            skip = False
+            continue
+        if a in ("-p", "--password") and i + 1 < len(argv):
+            pw = argv[i + 1]
+            out.append("--password-stdin")
+            skip = True
+        else:
+            out.append(a)
+    return out, pw
 
 
 def parse_env_assignments(text: str) -> dict:
@@ -284,12 +329,15 @@ def _login_tokens(command: str) -> list[str] | None:
     Pipelines (the ECR `get-login-password | …` case) are not logins we prompt
     for — they already feed a password — so a '|' disqualifies the command.
     """
-    if "|" in command:
-        return None
-    try:
-        toks = shlex.split(command, posix=(sys.platform != "win32"))
-    except ValueError:
-        return None
+    if isinstance(command, list):
+        toks = command
+    else:
+        if "|" in command:
+            return None
+        try:
+            toks = shlex.split(command, posix=(sys.platform != "win32"))
+        except ValueError:
+            return None
     if not toks:
         return None
     bin0 = toks[0].lower()
@@ -393,10 +441,11 @@ def build_login_argv(command: str, username: str = "") -> list[str]:
     of what characters it contains. `--password-stdin` is added so the password
     is fed on stdin. Only valid for logins without a pipe (the prompt case).
     """
-    toks = shlex.split(command, posix=True)
+    toks = list(command) if isinstance(command, list) else shlex.split(command, posix=True)
     if username:
         toks += ["-u", username]
-    toks += ["--password-stdin"]
+    if "--password-stdin" not in toks:
+        toks += ["--password-stdin"]
     return toks
 
 

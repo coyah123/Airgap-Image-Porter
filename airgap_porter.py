@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import queue
+import shlex
 import subprocess
 import sys
 import threading
@@ -474,9 +475,13 @@ class App(tk.Tk):
                          daemon=True).start()
 
     def _apply_env_worker(self, env: dict):
+        # Resolve in order so earlier vars feed later ones (e.g. ACR_NAME used
+        # inside PASSWORD=$(az … --name $ACR_NAME …)). Expand $VARs against
+        # os.environ + what we've resolved so far, THEN run any $(…) command.
         resolved = {}
         for k, v in env.items():
-            val, err = docker_ops.resolve_env_value(v)
+            expanded = docker_ops.expand_vars(v, {**os.environ, **resolved})
+            val, err = docker_ops.resolve_env_value(expanded)
             if err:
                 self._status_q.put(("env_err", f"{k}: {err}"))
                 return
@@ -579,25 +584,50 @@ class App(tk.Tk):
         self._notify(f"Deleted saved login “{name}”.", "ok")
 
     def _do_login(self):
-        cmd = self._login_command_text()
-        if not cmd:
+        raw = self._login_command_text()
+        if not raw:
             self._notify("Paste a login command first.", "warn")
             return
+        # $VAR refs are expanded by us (not the shell), from the applied session
+        # env, so $ACR_NAME / $USERNAME / $PASSWORD work on any platform. Warn if a
+        # referenced var isn't set (usually: forgot to Apply the environment set).
+        missing = sorted(docker_ops.referenced_vars(raw) - set(os.environ))
+        if missing:
+            self._notify("These variables aren't set — did you Apply the environment "
+                         f"set first? {', '.join(missing)}", "warn")
+
         # `producer | docker login … --password-stdin …` (the ECR pattern): run the
         # two halves separately without a shell, so a clean token is captured and we
         # can tell whether the token command or docker itself failed.
-        piped = docker_ops.split_piped_login(cmd)
+        piped = docker_ops.split_piped_login(raw)
         if piped:
-            self._last_login_target = docker_ops.login_target(piped[1])
-            self._last_login_kind = "helm" if docker_ops.is_helm_login(piped[1]) else "docker"
-            self._run_piped_login(*piped)
+            prod = [docker_ops.expand_vars(t) for t in piped[0]]
+            login = [docker_ops.expand_vars(t) for t in piped[1]]
+            self._remember_login_kind(login)
+            self._run_piped_login(prod, login)
             return
-        # If this is a plain `docker login` with no password, docker would try to
-        # prompt on a TTY we don't have — so reveal the inline credentials panel
-        # and run the login when the user presses Continue (no modal popup).
-        if docker_ops.login_needs_password(cmd):
-            self._pending_login_cmd = cmd
-            need_user = not docker_ops.login_has_username(cmd)
+
+        # Everything else runs shell-free as argv: tokenize, then expand $VARs
+        # per-token (so a password token stays intact no matter its characters).
+        try:
+            argv = [docker_ops.expand_vars(t) for t in shlex.split(raw, posix=True)]
+        except ValueError:
+            # Unbalanced quotes etc. — fall back to a whole-string shell run.
+            cmd = docker_ops.expand_vars(raw)
+            self._remember_login_kind(cmd)
+            self._run_now([("registry login", cmd, None)], after=self._login_result)
+            return
+
+        # An inline -p/--password is moved to stdin so it never hits argv/log.
+        argv, pw = docker_ops.extract_password(argv)
+        self._remember_login_kind(argv)
+        if pw is not None:
+            self._run_now([("registry login", argv, pw + "\n")], after=self._login_result)
+            return
+        # A docker/helm/podman login with NO password at all → prompt inline.
+        if docker_ops.login_needs_password(argv):
+            self._pending_login_cmd = argv
+            need_user = not docker_ops.login_has_username(argv)
             self.cred_user_var.set("")
             self.cred_pw_var.set("")
             if need_user:
@@ -611,10 +641,13 @@ class App(tk.Tk):
             self._notify("This login has no password — enter it below, then Continue.",
                          "info")
             return
-        # Login fetches/sets creds locally — run it directly (not via the plan).
-        self._last_login_target = docker_ops.login_target(cmd)
-        self._last_login_kind = "helm" if docker_ops.is_helm_login(cmd) else "docker"
-        self._run_now([("registry login", cmd, None)], after=self._login_result)
+        # e.g. `az acr login --name myacr` — no password needed; run as argv.
+        self._run_now([("registry login", argv, None)], after=self._login_result)
+
+    def _remember_login_kind(self, command):
+        """Stash the registry/kind for the status indicators from a login command."""
+        self._last_login_target = docker_ops.login_target(command)
+        self._last_login_kind = "helm" if docker_ops.is_helm_login(command) else "docker"
 
     def _submit_login_creds(self):
         """Run the pending login using the inline username/password fields."""
@@ -623,9 +656,7 @@ class App(tk.Tk):
             self._notify("Password is empty.", "warn")
             return
         user = self.cred_user_var.get().strip()
-        self._last_login_target = docker_ops.login_target(self._pending_login_cmd)
-        self._last_login_kind = ("helm" if docker_ops.is_helm_login(self._pending_login_cmd)
-                                 else "docker")
+        self._remember_login_kind(self._pending_login_cmd)
         # Run as an argv list (not a shell string) so the username is a discrete
         # argument and can't be parsed as shell syntax; password goes on stdin.
         cmd = docker_ops.build_login_argv(self._pending_login_cmd, user)
