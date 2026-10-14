@@ -1060,6 +1060,20 @@ class App(tk.Tk):
         self.prefix_profile_box["values"] = names
         if select and select in names:
             self.prefix_profile_var.set(select)
+        # Mirror the same saved prefixes into the Helm push picker (built later,
+        # so it may not exist on the first call from the Local Images tab).
+        if getattr(self, "helm_prefix_box", None) is not None:
+            self.helm_prefix_box["values"] = names
+
+    def _apply_helm_prefix(self):
+        """Build the OCI target from the selected saved prefix + path box, e.g.
+        prefix `myacr.azurecr.io` + path `helm` → `oci://myacr.azurecr.io/helm`."""
+        target = prefix_store.target_for(self.helm_prefix_var.get())
+        if not target:
+            return
+        path = self.helm_oci_path_var.get().strip().strip("/")
+        base = target["prefix"].strip().strip("/")
+        self.oci_target_var.set(f"oci://{base}" + (f"/{path}" if path else ""))
 
     def _load_prefix_profile(self):
         target = prefix_store.target_for(self.prefix_profile_var.get())
@@ -1362,14 +1376,34 @@ class App(tk.Tk):
         ttk.Entry(push, textvariable=self.oci_target_var, width=46).grid(
             row=1, column=1, padx=4, sticky="we")
         push.columnconfigure(1, weight=1)
+
+        # Reuse the saved registry prefixes (from Local Images) to build the OCI
+        # target — pick one and it fills `oci://<prefix>/<path>` for you.
+        prerow = ttk.Frame(push)
+        prerow.grid(row=2, column=1, sticky="w", pady=(2, 0))
+        ttk.Label(prerow, text="Use saved prefix:").pack(side="left")
+        self.helm_prefix_var = tk.StringVar()
+        self.helm_prefix_box = ttk.Combobox(prerow, textvariable=self.helm_prefix_var,
+                                            width=22, state="readonly")
+        self.helm_prefix_box.pack(side="left", padx=4)
+        self.helm_prefix_box.bind("<<ComboboxSelected>>",
+                                  lambda _e: self._apply_helm_prefix())
+        ttk.Label(prerow, text="path:").pack(side="left", padx=(8, 0))
+        self.helm_oci_path_var = tk.StringVar(value="helm")
+        pe = ttk.Entry(prerow, textvariable=self.helm_oci_path_var, width=16)
+        pe.pack(side="left", padx=4)
+        pe.bind("<KeyRelease>", lambda _e: self._apply_helm_prefix())
+
         ttk.Label(push, text="Log in via the Registry login box at the top "
                   "(docker/az login populates the store helm OCI push uses).",
-                  foreground="#777").grid(row=2, column=1, sticky="w", pady=(2, 4))
+                  foreground="#777").grid(row=3, column=1, sticky="w", pady=(2, 4))
         bb = ttk.Frame(push)
-        bb.grid(row=3, column=1, sticky="w", pady=(2, 0))
+        bb.grid(row=4, column=1, sticky="w", pady=(2, 0))
         b = ttk.Button(bb, text="⬆ Push chart", command=self._push_chart)
         b.pack(side="left")
         self._action_btns.append(b)
+
+        self._reload_prefix_profiles()   # fill the saved-prefix picker above
 
     def _refresh_repos(self):
         threading.Thread(target=self._repos_worker, daemon=True).start()

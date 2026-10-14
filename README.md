@@ -95,7 +95,10 @@ paths), alongside the saved login and environment profiles.
   the container images it references, then adds them to the **Pull & Save** list
   so you can pull those for your target platform too.
 - **Push chart to OCI (ACR)** — `helm registry login` (reuses the top login-bar
-  creds) + `helm push <chart.tgz> oci://<acr>.azurecr.io/<ns>`.
+  creds) + `helm push <chart.tgz> oci://<acr>.azurecr.io/<ns>`. The **Use saved
+  prefix** picker reuses the registry prefixes saved on *Local Images*: pick one
+  and (with the **path** box, default `helm`) it fills the OCI target as
+  `oci://<prefix>/<path>`, so you don't retype the registry each time.
 
 ### Per-pull folders
 
