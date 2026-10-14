@@ -40,6 +40,7 @@ import docker_ops
 import env_store
 import helm_ops
 import login_store
+import prefix_store
 
 
 # ---------------------------------------------------------------------------
@@ -937,6 +938,23 @@ class App(tk.Tk):
         ttk.Button(row1, text="Preview", command=self._preview_reprefix).pack(
             side="left", padx=(12, 0))
 
+        # --- save / recall named prefix targets (so porting to a new registry
+        #     or directory is one click next time) ---
+        prow = ttk.Frame(box)
+        prow.pack(fill="x", pady=(8, 0))
+        ttk.Label(prow, text="Saved target:").pack(side="left")
+        self.prefix_profile_var = tk.StringVar()
+        self.prefix_profile_box = ttk.Combobox(prow, textvariable=self.prefix_profile_var,
+                                               width=24, state="readonly")
+        self.prefix_profile_box.pack(side="left", padx=4)
+        self.prefix_profile_box.bind("<<ComboboxSelected>>",
+                                     lambda _e: self._load_prefix_profile())
+        ttk.Button(prow, text="Delete", command=self._delete_prefix_profile).pack(side="left")
+        ttk.Label(prow, text="Name:").pack(side="left", padx=(12, 0))
+        self.prefix_name_var = tk.StringVar()
+        ttk.Entry(prow, textvariable=self.prefix_name_var, width=18).pack(side="left", padx=4)
+        ttk.Button(prow, text="💾 Save", command=self._save_prefix_profile).pack(side="left")
+
         row2 = ttk.Frame(box)
         row2.pack(fill="x", pady=(8, 0))
         for text, cmd in (("🏷️ Tag selected", lambda: self._reprefix_selected(push=False)),
@@ -946,6 +964,8 @@ class App(tk.Tk):
             btn = ttk.Button(row2, text=text, command=cmd)
             btn.pack(side="left", padx=(0, 6))
             self._action_btns.append(btn)
+
+        self._reload_prefix_profiles()
 
     def _refresh_images(self):
         self.status.config(text="Loading images…")
@@ -981,6 +1001,51 @@ class App(tk.Tk):
     def _selected_refs(self) -> list[str]:
         """The `ref` (repo:tag or image id) of each selected tree row."""
         return [iid.split("\x00", 1)[0] for iid in self.img_tree.selection()]
+
+    def _reload_prefix_profiles(self, select: str = ""):
+        self._prefix_profiles = prefix_store.load()
+        names = [p["name"] for p in self._prefix_profiles]
+        self.prefix_profile_box["values"] = names
+        if select and select in names:
+            self.prefix_profile_var.set(select)
+
+    def _load_prefix_profile(self):
+        target = prefix_store.target_for(self.prefix_profile_var.get())
+        if target:
+            self.prefix_var.set(target["prefix"])
+            self.add_prefix_var.set(target["add"])
+            self.keep_old_reg_var.set(target["keep"])
+            self.prefix_name_var.set(self.prefix_profile_var.get())
+
+    def _save_prefix_profile(self):
+        name = self.prefix_name_var.get().strip() or self.prefix_profile_var.get().strip()
+        prefix = self.prefix_var.get().strip()
+        if not name:
+            self._notify("Give the prefix target a name first.", "warn")
+            return
+        if not prefix:
+            self._notify("Nothing to save — enter a registry prefix.", "warn")
+            return
+        prefix_store.upsert(name, prefix, self.add_prefix_var.get(),
+                            self.keep_old_reg_var.get())
+        self._reload_prefix_profiles(select=name)
+        self._notify(f"Saved prefix target “{name}”.", "ok")
+
+    def _delete_prefix_profile(self):
+        name = self.prefix_profile_var.get().strip()
+        if not name:
+            return
+        # Two-step confirm (no popup), same as deleting a saved login/env set.
+        if getattr(self, "_prefix_delete_armed", None) != name:
+            self._prefix_delete_armed = name
+            self._notify(f"Click Delete again to remove prefix target “{name}”.", "warn")
+            self.after(4000, lambda: setattr(self, "_prefix_delete_armed", None))
+            return
+        self._prefix_delete_armed = None
+        prefix_store.delete(name)
+        self.prefix_profile_var.set("")
+        self._reload_prefix_profiles()
+        self._notify(f"Deleted prefix target “{name}”.", "ok")
 
     def _preview_reprefix(self):
         refs = self._selected_refs()

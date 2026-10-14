@@ -66,6 +66,14 @@ Lists local images; multi-select to **mass re-prefix** (swap/prepend a registry
 prefix — e.g. everything from `oldacr.azurecr.io/...` → `newacr.azurecr.io/...`),
 then tag, tag & push, push, or remove. **Preview** shows every `source → dest`.
 
+**Saved targets** — the re-prefix trio (registry prefix, add-path prefix, and the
+*keep old registry* flag) can be saved under a name so porting a batch to a new
+registry/directory is one click next time. Pick a **Saved target** from the
+dropdown to fill the fields; type a **Name** and press **💾 Save** to store the
+current fields; **Delete** (two-step confirm) removes one. Targets live in
+`~/.airgap-porter/prefix-profiles.json` (no secrets — just registry hostnames and
+paths), alongside the saved login and environment profiles.
+
 ### Helm Charts
 
 - **Repositories** — add a repo (name + URL), **Update repos** (`helm repo update`).
@@ -98,6 +106,9 @@ safe operations like `helm repo update` run immediately.)
 - `helm_ops.py` — Helm CLI logic: repo/search/pull/template/push argv builders,
   JSON parsers, chart `.tgz` naming, and image extraction from rendered YAML.
   Pure helpers in both modules are unit-testable without Docker/Helm or a display.
+- `login_store.py` / `env_store.py` / `prefix_store.py` — persist named profiles in
+  `~/.airgap-porter/` (registry logins, session-env sets, and re-prefix targets
+  respectively). Free functions, unit-testable, JSON-backed.
 
 ## Notes
 
