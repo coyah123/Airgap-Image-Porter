@@ -56,6 +56,23 @@ def delete(name: str, path: Path = STORE_PATH) -> list[dict]:
     return profiles
 
 
+def rename(old: str, new: str, path: Path = STORE_PATH) -> list[dict]:
+    """Rename profile `old` to `new`, keeping its command and list position.
+
+    No-op if `old` doesn't exist. Any existing profile already named `new` is
+    dropped first (the rename would otherwise create a duplicate name).
+    """
+    old, new = old.strip(), new.strip()
+    if not new or old == new:
+        return load(path)
+    profiles = [p for p in load(path) if p["name"] != new]
+    for p in profiles:
+        if p["name"] == old:
+            p["name"] = new
+    _write(profiles, path)
+    return profiles
+
+
 def command_for(name: str, path: Path = STORE_PATH) -> str:
     """The saved command for `name`, or '' if there's no such profile."""
     for p in load(path):

@@ -19,7 +19,9 @@ images won't start. This tool makes the target platform **explicit** on every pu
 
 1. **Login** (top bar) — `docker login` against the source registry. The password /
    access token is fed via `--password-stdin`, so it never appears in argv or the
-   process table. Leave *Registry* blank for Docker Hub.
+   process table. Leave *Registry* blank for Docker Hub. Saved logins can be
+   recalled from the dropdown; **✎ Rename** renames the selected one in place
+   (type the new name in the *Name* box first) rather than saving a duplicate.
 2. **Pull & Save tab** (internet-connected machine):
    - Choose the **target platform** (`linux/amd64` default).
    - Paste your image list (one per line; `#` comments and blank lines ignored),

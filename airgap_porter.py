@@ -360,6 +360,7 @@ class App(tk.Tk):
         self.profile_name_var = tk.StringVar()
         ttk.Entry(row, textvariable=self.profile_name_var, width=18).pack(side="left", padx=4)
         ttk.Button(row, text="💾 Save", command=self._save_profile).pack(side="left")
+        ttk.Button(row, text="✎ Rename", command=self._rename_profile).pack(side="left")
         run = ttk.Button(row, text="🔑 Run login", style="Accent.TButton",
                          command=self._do_login)
         run.pack(side="right")
@@ -576,6 +577,22 @@ class App(tk.Tk):
         login_store.upsert(name, cmd)
         self._reload_profiles(select=name)
         self._notify(f"Saved login profile “{name}”.", "ok")
+
+    def _rename_profile(self):
+        """Rename the selected saved login to the Name box value (in place)."""
+        old = self.profile_var.get().strip()
+        new = self.profile_name_var.get().strip()
+        if not old:
+            self._notify("Pick a saved login to rename first.", "warn")
+            return
+        if not new:
+            self._notify("Type the new name in the Name box.", "warn")
+            return
+        if new == old:
+            return
+        login_store.rename(old, new)
+        self._reload_profiles(select=new)
+        self._notify(f"Renamed login “{old}” → “{new}”.", "ok")
 
     def _delete_profile(self):
         name = self.profile_var.get().strip()
