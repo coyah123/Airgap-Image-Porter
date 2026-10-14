@@ -30,6 +30,17 @@ def docker_path() -> str | None:
     return shutil.which("docker")
 
 
+def server_version_argv() -> list[str]:
+    """`docker version` of just the *server* — the real "is the daemon up?" test.
+
+    `docker_path()` only proves the CLI is installed; this command talks to the
+    daemon and fails (non-zero, empty output) when Docker isn't running or the
+    engine is unreachable. Runs through the same PATH `docker` as every other
+    command, so it reflects exactly what the launching terminal can reach.
+    """
+    return ["docker", "version", "--format", "{{.Server.Version}}"]
+
+
 def format_command(argv) -> str:
     """A copy-pasteable shell string for an argv list (password args masked).
 

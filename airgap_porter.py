@@ -111,6 +111,7 @@ class App(tk.Tk):
         self._q: queue.Queue = queue.Queue()
         self._img_q: queue.Queue = queue.Queue()
         self._helm_q: queue.Queue = queue.Queue()
+        self._status_q: queue.Queue = queue.Queue()
         self.runner = JobRunner(self._q)
         self._action_btns: list[ttk.Button] = []
         self._img_rows: list[dict] = []   # last-loaded `docker images` rows
@@ -120,6 +121,7 @@ class App(tk.Tk):
         self._helm_versions: list[dict] = []  # last `helm search` result rows
 
         self._init_style()
+        self._build_status_bar()
         self._build_login_bar()
 
         # Body = left sidebar (nav) + a notebook whose tab strip is hidden; the
@@ -146,6 +148,7 @@ class App(tk.Tk):
 
         self._build_log_pane()
 
+        self._refresh_docker_status()
         if not docker_ops.docker_path():
             self._log("⚠ docker not found on PATH. Install Docker Desktop / dockerd "
                       "and reopen, or the Pull/Save/Push actions will fail.")
@@ -176,6 +179,55 @@ class App(tk.Tk):
         style.configure("NavHeader.TLabel", background="#eef1f5",
                         foreground="#667085", font=("", 8, "bold"))
         style.configure("Accent.TButton", font=("", 10, "bold"))
+        style.configure("Status.TFrame", background="#f4f6f9")
+
+    # -- Docker connection status banner (top of window) -------------------
+    def _build_status_bar(self):
+        """A red/green Docker-daemon indicator with a manual refresh button.
+
+        The check shells out to the same PATH `docker` everything else uses, so
+        the dot reflects exactly what the launching terminal can reach — green
+        only when the daemon actually answers, red when it's missing or down.
+        """
+        bar = ttk.Frame(self, padding=(10, 6), style="Status.TFrame")
+        bar.pack(fill="x", padx=8, pady=(8, 0))
+        # Classic tk.Label so we can recolor the dot directly (ttk theming the
+        # foreground of a single glyph is fiddly under 'clam').
+        self.docker_dot = tk.Label(bar, text="●", font=("", 15), fg="#999",
+                                   bg="#f4f6f9")
+        self.docker_dot.pack(side="left")
+        self.docker_status_lbl = ttk.Label(bar, text="Checking Docker…",
+                                            font=("", 10, "bold"))
+        self.docker_status_lbl.pack(side="left", padx=(6, 0))
+        self.docker_detail_lbl = ttk.Label(bar, text="", foreground="#777")
+        self.docker_detail_lbl.pack(side="left", padx=(12, 0))
+        self.docker_refresh_btn = ttk.Button(bar, text="⟳ Refresh",
+                                              command=self._refresh_docker_status)
+        self.docker_refresh_btn.pack(side="right")
+
+    def _refresh_docker_status(self):
+        """Re-check the daemon on a background thread (amber dot meanwhile)."""
+        self.docker_dot.config(fg="#e0a800")
+        self.docker_status_lbl.config(text="Checking Docker…")
+        self.docker_detail_lbl.config(text="")
+        threading.Thread(target=self._docker_status_worker, daemon=True).start()
+
+    def _docker_status_worker(self):
+        path = docker_ops.docker_path()
+        if not path:
+            self._status_q.put(("down", "docker not found on PATH"))
+            return
+        try:
+            code, out = docker_ops.run_capture(docker_ops.server_version_argv())
+        except FileNotFoundError:
+            self._status_q.put(("down", "docker not found on PATH"))
+            return
+        if code == 0 and out.strip():
+            self._status_q.put(("up", out.strip()))
+        else:
+            # A running CLI but unreachable daemon prints its error to stderr.
+            self._status_q.put(("down", out.strip().splitlines()[-1] if out.strip()
+                                else "daemon not responding"))
 
     def _build_sidebar_nav(self):
         """One button per screen, grouped under section headers."""
@@ -1116,6 +1168,21 @@ class App(tk.Tk):
                     cb, self._after_job = self._after_job, None
                     if cb:
                         cb()
+        except queue.Empty:
+            pass
+        # Drain the Docker-status check (the red/green banner at the top).
+        try:
+            while True:
+                kind, detail = self._status_q.get_nowait()
+                if kind == "up":
+                    self.docker_dot.config(fg="#2e9e44")
+                    self.docker_status_lbl.config(text="Docker connected")
+                    self.docker_detail_lbl.config(
+                        text=f"server v{detail}  ·  {docker_ops.docker_path()}")
+                elif kind == "down":
+                    self.docker_dot.config(fg="#d33")
+                    self.docker_status_lbl.config(text="Docker not available")
+                    self.docker_detail_lbl.config(text=detail)
         except queue.Empty:
             pass
         # Drain the images-list worker too.
