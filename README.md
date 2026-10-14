@@ -81,6 +81,9 @@ paths), alongside the saved login and environment profiles.
 ### Helm Charts
 
 - **Repositories** — add a repo (name + URL), **Update repos** (`helm repo update`).
+  **Click a repo** to list every chart it offers, with its chart version and app
+  version, in the table below (runs `helm search repo <name>/ --versions`) — no
+  need to type a keyword first.
 - **Search** — `helm search repo <kw> --versions`; lists every chart version with
   its app version and description.
 - **Pull chart(s)** — downloads the selected versions as `.tgz` into the charts

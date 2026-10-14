@@ -1279,6 +1279,11 @@ class App(tk.Tk):
         self.repo_tree.heading("url", text="URL")
         self.repo_tree.column("url", width=560)
         self.repo_tree.pack(fill="x")
+        # Click a repo to list all its charts' versions (chart + app versions)
+        # in the table below — no need to type a keyword.
+        self.repo_tree.bind("<<TreeviewSelect>>", self._on_repo_select)
+        ttk.Label(repos, text="Tip: click a repo to list its chart versions below.",
+                  foreground="#777").pack(anchor="w", pady=(4, 0))
         rr = ttk.Frame(repos)
         rr.pack(fill="x", pady=(6, 0))
         ttk.Label(rr, text="Add — name:").pack(side="left")
@@ -1396,6 +1401,18 @@ class App(tk.Tk):
             self._helm_q.put(("err", "helm not found on PATH."))
             return
         self._helm_q.put(("versions", helm_ops.parse_search(out) if code == 0 else []))
+
+    def _on_repo_select(self, _e=None):
+        """List every chart version in the clicked repo (chart + app versions)."""
+        sel = self.repo_tree.selection()
+        if not sel:
+            return
+        name = sel[0]   # iid is the repo name
+        # `helm search repo <name>/` matches all charts in that one repo.
+        self.helm_query_var.set(f"{name}/")
+        self.status.config(text=f"Listing charts in “{name}”…")
+        threading.Thread(target=self._search_worker, args=(f"{name}/",),
+                         daemon=True).start()
 
     def _populate_helm(self):
         self.helm_tree.delete(*self.helm_tree.get_children(""))
@@ -1779,7 +1796,8 @@ class App(tk.Tk):
                 if kind == "repos":
                     self.repo_tree.delete(*self.repo_tree.get_children(""))
                     for r in payload:
-                        self.repo_tree.insert("", "end", values=(r["name"], r["url"]))
+                        self.repo_tree.insert("", "end", iid=r["name"],
+                                              values=(r["name"], r["url"]))
                 elif kind == "versions":
                     self._helm_versions = payload
                     self._populate_helm()
