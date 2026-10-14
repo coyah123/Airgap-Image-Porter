@@ -210,11 +210,42 @@ class App(tk.Tk):
         self.docker_detail_lbl = ttk.Label(row1, text="", foreground="#777")
         self.docker_detail_lbl.pack(side="left", padx=(12, 0))
 
+        # Registry connection indicators (reflect the last login this session):
+        # one for Docker/OCI registries, one for Helm registries. Red until a
+        # login succeeds, then green with the registry host.
+        self.reg_dot, self.reg_lbl = self._make_conn_row(
+            bar, "Docker registry")
+        self.helm_reg_dot, self.helm_reg_lbl = self._make_conn_row(
+            bar, "Helm registry")
+
         row2 = ttk.Frame(bar, style="Status.TFrame")
         row2.pack(fill="x", pady=(6, 0))
         self.docker_refresh_btn = ttk.Button(row2, text="⟳ Refresh",
                                               command=self._refresh_docker_status)
         self.docker_refresh_btn.pack(side="left")
+
+    def _make_conn_row(self, parent, prefix: str):
+        """A small dot + label row for a registry connection indicator."""
+        row = ttk.Frame(parent, style="Status.TFrame")
+        row.pack(fill="x", pady=(2, 0))
+        dot = tk.Label(row, text="●", font=("", 12), fg="#d33", bg="#f4f6f9")
+        dot.pack(side="left")
+        lbl = ttk.Label(row, text=f"{prefix}: not connected", foreground="#555")
+        lbl.pack(side="left", padx=(6, 0))
+        lbl._prefix = prefix   # stash for updates
+        return dot, lbl
+
+    def _set_registry_status(self, kind: str, ok: bool, target: str = ""):
+        """Update the Docker or Helm registry indicator (kind ∈ {docker, helm})."""
+        dot, lbl = ((self.helm_reg_dot, self.helm_reg_lbl) if kind == "helm"
+                    else (self.reg_dot, self.reg_lbl))
+        prefix = lbl._prefix
+        if ok:
+            dot.config(fg="#2e9e44")
+            lbl.config(text=f"{prefix}: connected — {target or 'logged in'}")
+        else:
+            dot.config(fg="#d33")
+            lbl.config(text=f"{prefix}: login failed{(' — ' + target) if target else ''}")
 
     def _refresh_docker_status(self):
         """Re-check the daemon on a background thread (amber dot meanwhile)."""
@@ -269,11 +300,13 @@ class App(tk.Tk):
 
     # -- login bar (paste any login command; save named profiles) -----------
     _LOGIN_PLACEHOLDER = (
-        "# Paste a full login command (pipelines OK), e.g.:\n"
+        "# Paste a full login command (pipelines & extra args OK), e.g.:\n"
         "# docker login myregistry.io -u user -p <token>\n"
         "# aws ecr get-login-password --region us-east-1 | docker login "
         "--username AWS --password-stdin 123456789.dkr.ecr.us-east-1.amazonaws.com\n"
-        "# az acr login --name myacr")
+        "# az acr login --name myacr\n"
+        "# helm registry login myacr.azurecr.io -u user              (prompts for password)\n"
+        "# helm registry login registry.example.com -u user --insecure   (extra args pass through)")
 
     _ENV_PLACEHOLDER = (
         "# Paste credentials / env for THIS session (one per line). The app shells\n"
@@ -287,7 +320,20 @@ class App(tk.Tk):
         f = ttk.LabelFrame(self, text="Registry login", padding=8)
         f.pack(fill="x", padx=8, pady=8)
 
-        row = ttk.Frame(f)
+        # Collapsible: a header row stays visible; everything else lives in
+        # `login_body`, which can be hidden to reclaim space once you're logged in.
+        header = ttk.Frame(f)
+        header.pack(fill="x")
+        self.login_toggle_btn = ttk.Button(header, text="▾ Hide", width=9,
+                                            command=self._toggle_login_panel)
+        self.login_toggle_btn.pack(side="left")
+        ttk.Label(header, text="Docker & Helm registry login",
+                  foreground="#777").pack(side="left", padx=(8, 0))
+
+        self.login_body = ttk.Frame(f)
+        self.login_body.pack(fill="x", pady=(6, 0))
+
+        row = ttk.Frame(self.login_body)
         row.pack(fill="x")
         ttk.Label(row, text="Saved login:").pack(side="left")
         self.profile_var = tk.StringVar()
@@ -314,19 +360,19 @@ class App(tk.Tk):
                                           fg="#999", font=("", 9, "bold"))
         self.login_status_lbl.pack(side="right")
 
-        self.login_cmd = scrolledtext.ScrolledText(f, height=4, wrap="word",
-                                                   font=("Consolas", 9))
+        self.login_cmd = scrolledtext.ScrolledText(self.login_body, height=4,
+                                                   wrap="word", font=("Consolas", 9))
         self.login_cmd.pack(fill="x", pady=(6, 0))
         self.login_cmd.insert("1.0", self._LOGIN_PLACEHOLDER)
-        ttk.Label(f, text="Runs through your shell. Saved profiles live in "
-                  f"{login_store.STORE_PATH} (may contain secrets — keep it private).",
+        ttk.Label(self.login_body, text="Runs through your shell. Saved profiles live "
+                  f"in {login_store.STORE_PATH} (may contain secrets — keep it private).",
                   foreground="#777").pack(anchor="w", pady=(4, 0))
 
         # Inline credentials panel — shown in-window (not as a modal popup) only
         # when a login lacks a password. Locked-down/secure environments may block
         # popup windows, so everything stays inside the main window.
         self._pending_login_cmd = None
-        self.cred_frame = ttk.Frame(f)
+        self.cred_frame = ttk.Frame(self.login_body)
         self.cred_user_var = tk.StringVar()
         self.cred_pw_var = tk.StringVar()
         ttk.Label(self.cred_frame,
@@ -356,8 +402,8 @@ class App(tk.Tk):
         # see them). Written into os.environ; every later command inherits it. No
         # popup, nothing saved to disk, values never logged.
         self.env_frame = ttk.LabelFrame(
-            f, text="Session environment / credentials (applied to every command; "
-            "not saved to disk)", padding=6)
+            self.login_body, text="Session environment / credentials (applied to "
+            "every command; not saved to disk)", padding=6)
         self.env_txt = scrolledtext.ScrolledText(self.env_frame, height=5, wrap="none",
                                                   font=("Consolas", 9))
         self.env_txt.pack(fill="x")
@@ -373,6 +419,15 @@ class App(tk.Tk):
         self.env_applied_lbl.pack(side="left", padx=10)
         # Hidden until needed.
         self._reload_profiles()
+
+    def _toggle_login_panel(self):
+        """Collapse/expand the login controls to reclaim space after logging in."""
+        if self.login_body.winfo_manager():
+            self.login_body.pack_forget()
+            self.login_toggle_btn.config(text="▸ Show")
+        else:
+            self.login_body.pack(fill="x", pady=(6, 0))
+            self.login_toggle_btn.config(text="▾ Hide")
 
     def _toggle_env_panel(self):
         if self.env_frame.winfo_manager():
@@ -460,6 +515,7 @@ class App(tk.Tk):
         piped = docker_ops.split_piped_login(cmd)
         if piped:
             self._last_login_target = docker_ops.login_target(piped[1])
+            self._last_login_kind = "helm" if docker_ops.is_helm_login(piped[1]) else "docker"
             self._run_piped_login(*piped)
             return
         # If this is a plain `docker login` with no password, docker would try to
@@ -483,6 +539,7 @@ class App(tk.Tk):
             return
         # Login fetches/sets creds locally — run it directly (not via the plan).
         self._last_login_target = docker_ops.login_target(cmd)
+        self._last_login_kind = "helm" if docker_ops.is_helm_login(cmd) else "docker"
         self._run_now([("registry login", cmd, None)], after=self._login_result)
 
     def _submit_login_creds(self):
@@ -493,6 +550,8 @@ class App(tk.Tk):
             return
         user = self.cred_user_var.get().strip()
         self._last_login_target = docker_ops.login_target(self._pending_login_cmd)
+        self._last_login_kind = ("helm" if docker_ops.is_helm_login(self._pending_login_cmd)
+                                 else "docker")
         # Run as an argv list (not a shell string) so the username is a discrete
         # argument and can't be parsed as shell syntax; password goes on stdin.
         cmd = docker_ops.build_login_argv(self._pending_login_cmd, user)
@@ -558,12 +617,15 @@ class App(tk.Tk):
     def _login_result(self):
         """Explicit pass/fail feedback after a login job finishes (inline)."""
         target = getattr(self, "_last_login_target", "")
+        kind = getattr(self, "_last_login_kind", "docker")
         if getattr(self, "_last_job_failed", False):
             self._set_login_status(False, target)
+            self._set_registry_status(kind, False, target)
             self._notify("Login FAILED — check the registry, username, and password "
                          "in the Output pane above.", "error")
         else:
             self._set_login_status(True, target)
+            self._set_registry_status(kind, True, target)
             self._notify("Login succeeded.", "ok")
 
     def _set_login_status(self, ok: bool, target: str = ""):

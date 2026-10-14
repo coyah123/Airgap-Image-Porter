@@ -293,6 +293,15 @@ _LOGIN_WORDS = {"docker", "podman", "nerdctl", "helm", "aws", "az", "login",
                 "registry", "ecr", "acr", "get-login-password"}
 
 
+def is_helm_login(command) -> bool:
+    """True if `command` (argv list or string) is a `helm …` login."""
+    try:
+        toks = command if isinstance(command, list) else shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    return bool(toks) and toks[0].lower() == "helm"
+
+
 def login_target(command) -> str:
     """Best-effort registry/host to display for a login (argv list or string).
 
