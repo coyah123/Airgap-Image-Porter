@@ -30,6 +30,59 @@ def docker_path() -> str | None:
     return shutil.which("docker")
 
 
+# --- environment / credentials ----------------------------------------------
+# Every subprocess here inherits this process's os.environ (no call passes env=).
+# So a token command like `aws ecr get-login-password` fails when AWS creds aren't
+# in the environment the app was launched with. Rather than make the user quit,
+# export in their shell, and relaunch, we let them paste the same `export …` /
+# `set …` / `$env:…` lines and write them into os.environ — every later docker/aws
+# call then sees them. Kept as free functions (no UI) so they're unit-testable.
+_ENV_ASSIGN_RES = (
+    re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$"),      # bash/zsh/sh
+    re.compile(r"^\s*set\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$"),         # cmd.exe
+    re.compile(r"^\s*\$env:([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$"),   # PowerShell
+    re.compile(r"^\s*setx\s+([A-Za-z_][A-Za-z0-9_]*)\s+(.*)$"),      # Windows setx
+    re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$"),               # bare KEY=VALUE
+)
+
+
+def _strip_env_quotes(val: str) -> str:
+    """Strip one layer of surrounding quotes and a trailing ';' from a value."""
+    val = val.strip()
+    if val.endswith(";"):
+        val = val[:-1].rstrip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+        val = val[1:-1]
+    return val
+
+
+def parse_env_assignments(text: str) -> dict:
+    """Parse pasted credential lines into a {KEY: VALUE} dict.
+
+    Accepts, one assignment per line, any of:
+        export KEY=VALUE   set KEY=VALUE   $env:KEY="VALUE"   setx KEY VALUE   KEY=VALUE
+    Blank lines and `#` comments are ignored; surrounding quotes and a trailing
+    `;` are stripped. Raises ValueError listing lines that match no form so the
+    caller can tell the user exactly what to fix.
+    """
+    out: dict = {}
+    bad: list = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        for rx in _ENV_ASSIGN_RES:
+            m = rx.match(line)
+            if m:
+                out[m.group(1)] = _strip_env_quotes(m.group(2))
+                break
+        else:
+            bad.append(raw.rstrip())
+    if bad:
+        raise ValueError("Couldn't parse these line(s):\n  " + "\n  ".join(bad))
+    return out
+
+
 def server_version_argv() -> list[str]:
     """`docker version` of just the *server* — the real "is the daemon up?" test.
 
@@ -205,6 +258,36 @@ def login_needs_password(command: str) -> bool:
     return not any(t in ("-p", "--password", "--password-stdin") for t in toks)
 
 
+def split_piped_login(command: str):
+    """Split a `PRODUCER | docker login … --password-stdin …` into two argv lists.
+
+    Returns (producer_argv, login_argv) so the two halves can be run separately
+    *without a shell* — the token command's stdout is captured cleanly and fed to
+    `docker login` on stdin. This sidesteps shell-pipe ambiguity (cmd.exe vs sh
+    vs PowerShell) and lets us tell whether the token step or the login step
+    failed. Returns None for anything that isn't exactly this single-pipe shape
+    (those fall back to running through the shell as before).
+    """
+    if command.count("|") != 1:
+        return None
+    left, right = (s.strip() for s in command.split("|", 1))
+    if not left:
+        return None
+    try:
+        prod = shlex.split(left, posix=True)
+        login = shlex.split(right, posix=True)
+    except ValueError:
+        return None
+    if not prod or not login:
+        return None
+    b = login[0].lower()
+    is_login = ((b in _LOGIN_BINS and "login" in login)
+                or (b == "helm" and "registry" in login and "login" in login))
+    if not is_login or "--password-stdin" not in login:
+        return None
+    return prod, login
+
+
 def build_login_argv(command: str, username: str = "") -> list[str]:
     """Turn a passwordless login *command string* into an argv list to exec.
 
@@ -311,6 +394,21 @@ def run_capture(argv) -> tuple[int, str]:
         creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
     )
     return proc.returncode, proc.stdout
+
+
+def run_capture_split(argv) -> tuple[int, str, str]:
+    """Run `argv`, returning (exit_code, stdout, stderr) kept separate.
+
+    Used for the token half of a piped login (`aws ecr get-login-password`) so
+    the token (stdout) stays clean and any error (stderr) is reported on its own.
+    Raises FileNotFoundError if the binary is missing.
+    """
+    proc = subprocess.run(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace",
+        creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
+    )
+    return proc.returncode, proc.stdout, proc.stderr
 
 
 # --- streaming runner -------------------------------------------------------

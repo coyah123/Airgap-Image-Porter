@@ -275,6 +275,14 @@ class App(tk.Tk):
         "--username AWS --password-stdin 123456789.dkr.ecr.us-east-1.amazonaws.com\n"
         "# az acr login --name myacr")
 
+    _ENV_PLACEHOLDER = (
+        "# Paste credentials / env for THIS session (one per line). The app shells\n"
+        "# out to docker & aws, so these must be set in its environment. Examples:\n"
+        "#   set AWS_ACCESS_KEY_ID=AKIA...            (cmd.exe)\n"
+        "#   $env:AWS_SECRET_ACCESS_KEY=\"...\"          (PowerShell)\n"
+        "#   export AWS_SESSION_TOKEN=...             (bash/zsh)\n"
+        "#   AWS_DEFAULT_REGION=us-east-1")
+
     def _build_login_bar(self):
         f = ttk.LabelFrame(self, text="Registry login", padding=8)
         f.pack(fill="x", padx=8, pady=8)
@@ -296,6 +304,8 @@ class App(tk.Tk):
                          command=self._do_login)
         run.pack(side="right")
         self._action_btns.append(run)
+        ttk.Button(row, text="⚙ Environment / creds",
+                   command=self._toggle_env_panel).pack(side="right", padx=(0, 6))
 
         self.login_cmd = scrolledtext.ScrolledText(f, height=4, wrap="word",
                                                    font=("Consolas", 9))
@@ -333,8 +343,53 @@ class App(tk.Tk):
                    command=self._submit_login_creds).pack(side="left")
         ttk.Button(cb, text="Cancel",
                    command=self._cancel_login_creds).pack(side="left", padx=(6, 0))
+
+        # Inline environment / credentials panel — paste export/set/$env: lines to
+        # set vars for THIS session (so `aws ecr get-login-password`, docker, etc.
+        # see them). Written into os.environ; every later command inherits it. No
+        # popup, nothing saved to disk, values never logged.
+        self.env_frame = ttk.LabelFrame(
+            f, text="Session environment / credentials (applied to every command; "
+            "not saved to disk)", padding=6)
+        self.env_txt = scrolledtext.ScrolledText(self.env_frame, height=5, wrap="none",
+                                                  font=("Consolas", 9))
+        self.env_txt.pack(fill="x")
+        self.env_txt.insert("1.0", self._ENV_PLACEHOLDER)
+        eb = ttk.Frame(self.env_frame)
+        eb.pack(fill="x", pady=(6, 0))
+        ttk.Button(eb, text="Apply to session", style="Accent.TButton",
+                   command=self._apply_env).pack(side="left")
+        ttk.Button(eb, text="Clear",
+                   command=lambda: self.env_txt.delete("1.0", "end")).pack(
+                       side="left", padx=6)
+        self.env_applied_lbl = ttk.Label(eb, text="", foreground="#777")
+        self.env_applied_lbl.pack(side="left", padx=10)
         # Hidden until needed.
         self._reload_profiles()
+
+    def _toggle_env_panel(self):
+        if self.env_frame.winfo_manager():
+            self.env_frame.pack_forget()
+        else:
+            self.env_frame.pack(fill="x", pady=(8, 0))
+            self.env_txt.focus_set()
+
+    def _apply_env(self):
+        """Parse the pasted env lines and write them into this process's os.environ."""
+        try:
+            env = docker_ops.parse_env_assignments(self.env_txt.get("1.0", "end"))
+        except ValueError as e:
+            self._notify(str(e).replace("\n", " "), "error")
+            return
+        if not env:
+            self._notify("No environment assignments found to apply.", "warn")
+            return
+        os.environ.update({k: str(v) for k, v in env.items()})
+        names = ", ".join(sorted(env))   # names only — never log secret values
+        self.env_applied_lbl.config(text=f"applied: {names}")
+        self._notify(f"Applied {len(env)} variable(s) to this session: {names}", "ok")
+        # Creds/DOCKER_HOST may have changed what the daemon check can reach.
+        self._refresh_docker_status()
 
     def _login_command_text(self) -> str:
         txt = self.login_cmd.get("1.0", "end")
@@ -392,6 +447,13 @@ class App(tk.Tk):
         if not cmd:
             self._notify("Paste a login command first.", "warn")
             return
+        # `producer | docker login … --password-stdin …` (the ECR pattern): run the
+        # two halves separately without a shell, so a clean token is captured and we
+        # can tell whether the token command or docker itself failed.
+        piped = docker_ops.split_piped_login(cmd)
+        if piped:
+            self._run_piped_login(*piped)
+            return
         # If this is a plain `docker login` with no password, docker would try to
         # prompt on a TTY we don't have — so reveal the inline credentials panel
         # and run the login when the user presses Continue (no modal popup).
@@ -437,6 +499,51 @@ class App(tk.Tk):
         self.cred_frame.pack_forget()
         self._pending_login_cmd = None
         self._notify("Login cancelled.", "info")
+
+    def _run_piped_login(self, producer_argv, login_argv):
+        """Run `producer | docker login` as two shell-free steps on a thread."""
+        if self.runner.busy:
+            self._notify("A job is already running — wait for it to finish.", "warn")
+            return
+        self._after_job = self._login_result
+        self._set_busy(True)
+        threading.Thread(target=self._piped_login_worker,
+                         args=(producer_argv, login_argv), daemon=True).start()
+
+    def _piped_login_worker(self, producer_argv, login_argv):
+        q = self._q
+        q.put(("step", "fetch registry token"))
+        q.put(("cmd", docker_ops.format_command(producer_argv)))
+        try:
+            code, token, err = docker_ops.run_capture_split(producer_argv)
+        except FileNotFoundError:
+            q.put(("line", f"✗ '{producer_argv[0]}' not found on PATH — is it "
+                           "installed and on the app's PATH?"))
+            q.put(("done", "fetch registry token"))
+            return
+        for ln in (err or "").splitlines():
+            q.put(("line", ln))
+        if code != 0 or not token.strip():
+            q.put(("line", f"✗ token command exited {code} with no usable token — "
+                           "check credentials/region (⚙ Environment / creds)."))
+            q.put(("done", "fetch registry token"))
+            return
+        q.put(("ok", "fetch registry token"))
+        q.put(("step", "registry login"))
+        q.put(("cmd", docker_ops.format_command(login_argv)))
+        try:
+            lcode = docker_ops.run_stream(login_argv, lambda l: q.put(("line", l)),
+                                          stdin_text=token.strip() + "\n")
+        except FileNotFoundError:
+            q.put(("line", "✗ docker not found on PATH."))
+            q.put(("done", "registry login"))
+            return
+        if lcode != 0:
+            q.put(("line", f"✗ exit code {lcode}"))
+            q.put(("done", "registry login"))
+            return
+        q.put(("ok", "registry login"))
+        q.put(("done", ""))
 
     def _login_result(self):
         """Explicit pass/fail feedback after a login job finishes (inline)."""
