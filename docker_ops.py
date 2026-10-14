@@ -205,6 +205,22 @@ def login_needs_password(command: str) -> bool:
     return not any(t in ("-p", "--password", "--password-stdin") for t in toks)
 
 
+def build_login_argv(command: str, username: str = "") -> list[str]:
+    """Turn a passwordless login *command string* into an argv list to exec.
+
+    Tokenizing and running as argv (rather than appending to a shell string and
+    running via the shell) means the username is passed as its own argument and
+    can't be interpreted as shell syntax — no quoting/escaping hazard regardless
+    of what characters it contains. `--password-stdin` is added so the password
+    is fed on stdin. Only valid for logins without a pipe (the prompt case).
+    """
+    toks = shlex.split(command, posix=True)
+    if username:
+        toks += ["-u", username]
+    toks += ["--password-stdin"]
+    return toks
+
+
 def login_has_username(command: str) -> bool:
     """True if a recognized login command already carries a -u/--username."""
     toks = _login_tokens(command)

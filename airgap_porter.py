@@ -368,9 +368,9 @@ class App(tk.Tk):
             if not pw:
                 messagebox.showwarning("Login", "Password is empty.")
                 return
-            if user:
-                cmd = f'{cmd} -u "{user}"'
-            cmd = f"{cmd} --password-stdin"
+            # Run as an argv list (not a shell string) so the username is a
+            # discrete argument and can't be parsed as shell syntax.
+            cmd = docker_ops.build_login_argv(cmd, user)
             stdin_text = pw + "\n"
         # Login fetches/sets creds locally — run it directly (not via the plan).
         self._run_now([("registry login", cmd, stdin_text)], after=self._login_result)
