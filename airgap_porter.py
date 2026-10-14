@@ -111,8 +111,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("📦 Air-Gapped Image Porter")
-        self.geometry("1040x780")
         self.geometry("1180x840")
+        self.minsize(820, 560)   # keep the sashed panes usable when shrunk
         self._q: queue.Queue = queue.Queue()
         self._img_q: queue.Queue = queue.Queue()
         self._helm_q: queue.Queue = queue.Queue()
@@ -129,10 +129,20 @@ class App(tk.Tk):
         self._build_status_bar()
         self._build_login_bar()
 
+        # The content area and the Output log share the remaining vertical space
+        # through a draggable sash, so either can be grown at the other's expense
+        # (previously both just `expand`ed and the log got squeezed to a sliver at
+        # the very bottom). `body` is the top pane, the log frame the bottom pane.
+        # Classic tk.PanedWindow (not ttk) so panes get a `minsize` and a visible,
+        # draggable sash. `stretch="always"` lets both panes share window growth.
+        self.main_pane = tk.PanedWindow(self, orient="vertical", sashrelief="raised",
+                                        sashwidth=6, bg="#d0d4da")
+        self.main_pane.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+
         # Body = left sidebar (nav) + a notebook whose tab strip is hidden; the
         # sidebar buttons drive which screen shows. Same pattern as the K8s app.
-        body = ttk.Frame(self)
-        body.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        body = ttk.Frame(self.main_pane)
+        self.main_pane.add(body, stretch="always", minsize=160)
 
         self.sidebar = ttk.Frame(body, padding=(2, 6), style="Sidebar.TFrame")
         self.sidebar.pack(side="left", fill="y")
@@ -743,11 +753,55 @@ class App(tk.Tk):
             self.login_status_lbl.config(
                 text=f"✗ login failed{(' for ' + target) if target else ''}", fg="#d33")
 
+    # -- scrollable screen scaffold ----------------------------------------
+    def _screen(self, label: str, text: str) -> ttk.Frame:
+        """A notebook screen whose content scrolls vertically when it outgrows
+        the (now resizable) body pane. Returns the inner frame to pack widgets
+        into — padding matches the old `ttk.Frame(self.nb, padding=8)`. The outer
+        frame is what the notebook holds and what `self._screens` maps to.
+        """
+        outer = ttk.Frame(self.nb)
+        self.nb.add(outer, text=text)
+        self._screens[label] = outer
+
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        inner = ttk.Frame(canvas, padding=8)
+        win = canvas.create_window((0, 0), window=inner, anchor="nw")
+        # Keep the scrollregion in step with the content, and the content width
+        # in step with the canvas (so panes fill horizontally, not just scroll).
+        inner.bind("<Configure>",
+                   lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(win, width=e.width))
+
+        def _wheel(e):
+            # Defer to an inner scrollable widget (tree/text/listbox) when the
+            # pointer is over one, so this canvas doesn't fight their own wheel.
+            w = self.winfo_containing(e.x_root, e.y_root)
+            while w is not None and w is not canvas:
+                if isinstance(w, (ttk.Treeview, tk.Text, tk.Listbox, tk.Canvas)):
+                    return
+                w = getattr(w, "master", None)
+            delta = -1 if getattr(e, "num", None) == 5 else (
+                1 if getattr(e, "num", None) == 4 else int(-e.delta / 120))
+            canvas.yview_scroll(delta, "units")
+
+        # Bind the wheel only while the pointer is over this screen.
+        _wheel_seqs = ("<MouseWheel>", "<Button-4>", "<Button-5>")
+        canvas.bind("<Enter>", lambda _e: [canvas.bind_all(s, _wheel)
+                                           for s in _wheel_seqs])
+        canvas.bind("<Leave>", lambda _e: [canvas.unbind_all(s)
+                                           for s in _wheel_seqs])
+        return inner
+
     # -- Pull & Save tab ----------------------------------------------------
     def _build_pull_tab(self):
-        tab = ttk.Frame(self.nb, padding=8)
-        self.nb.add(tab, text="Pull & Save")
-        self._screens["Pull & Save"] = tab
+        tab = self._screen("Pull & Save", "Pull & Save")
 
         # Platform picker — the whole reason this tool exists.
         plat = ttk.Frame(tab)
@@ -874,9 +928,7 @@ class App(tk.Tk):
 
     # -- Images tab (view, mass re-prefix/tag, push, remove) ----------------
     def _build_images_tab(self):
-        tab = ttk.Frame(self.nb, padding=8)
-        self.nb.add(tab, text="Local Images")
-        self._screens["Local Images"] = tab
+        tab = self._screen("Local Images", "Local Images")
 
         top = ttk.Frame(tab)
         top.pack(fill="x")
@@ -1120,9 +1172,7 @@ class App(tk.Tk):
 
     # -- Load & Push tab ----------------------------------------------------
     def _build_push_tab(self):
-        tab = ttk.Frame(self.nb, padding=8)
-        self.nb.add(tab, text="Load & Push")
-        self._screens["Load & Push"] = tab
+        tab = self._screen("Load & Push", "Load & Push")
 
         ttk.Label(tab, text="On the air-gapped side: load the .tar(s), retag for the "
                   "destination registry, then push.", foreground="#555").pack(anchor="w")
@@ -1217,9 +1267,7 @@ class App(tk.Tk):
 
     # -- Helm Charts screen -------------------------------------------------
     def _build_helm_tab(self):
-        tab = ttk.Frame(self.nb, padding=8)
-        self.nb.add(tab, text="Helm Charts")
-        self._screens["Helm Charts"] = tab
+        tab = self._screen("Helm Charts", "Helm Charts")
 
         # --- repos row ---
         repos = ttk.LabelFrame(tab, text="Repositories", padding=6)
@@ -1430,9 +1478,7 @@ class App(tk.Tk):
 
     # -- Files screen (simple directory browser) ----------------------------
     def _build_files_tab(self):
-        tab = ttk.Frame(self.nb, padding=8)
-        self.nb.add(tab, text="Files")
-        self._screens["Files"] = tab
+        tab = self._screen("Files", "Files")
 
         top = ttk.Frame(tab)
         top.pack(fill="x")
@@ -1527,10 +1573,9 @@ class App(tk.Tk):
 
     # -- Preview / Run tab (dry-run staging — nothing runs until confirmed) -
     def _build_preview_tab(self):
-        tab = ttk.Frame(self.nb, padding=8)
-        self.nb.add(tab, text="Preview / Run")
-        self._screens["Preview / Run"] = tab
-        self._preview_tab = tab
+        tab = self._screen("Preview / Run", "Preview / Run")
+        # nb.select() needs the notebook's child (the outer frame), not `tab`.
+        self._preview_tab = self._screens["Preview / Run"]
 
         ttk.Label(tab, text="Every action stages its exact docker commands here "
                   "first. Nothing runs until you press “Run plan”.",
@@ -1605,8 +1650,10 @@ class App(tk.Tk):
 
     # -- shared log pane + job plumbing ------------------------------------
     def _build_log_pane(self):
-        f = ttk.LabelFrame(self, text="Output", padding=4)
-        f.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        # Bottom pane of the vertical sash. A `minsize` keeps the sash from being
+        # dragged shut, so the log can never be fully hidden again.
+        f = ttk.LabelFrame(self.main_pane, text="Output", padding=4)
+        self.main_pane.add(f, stretch="always", minsize=90)
         self.log = scrolledtext.ScrolledText(f, height=12, wrap="word",
                                              state="disabled", font=("Consolas", 9))
         self.log.pack(fill="both", expand=True)

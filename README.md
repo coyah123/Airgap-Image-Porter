@@ -35,6 +35,10 @@ images won't start. This tool makes the target platform **explicit** on every pu
    - **Retag & Push** runs `docker tag` + `docker push` for each.
 
 All output streams live into the bottom **Output** pane; one job runs at a time.
+The content area and the Output pane are split by a **draggable sash** — drag it
+up to give the log more room (it can't be dragged shut), down to reclaim space for
+the current screen. Each screen also **scrolls vertically** when its controls
+outgrow the window, so nothing is ever cut off on a small window.
 
 ## Prerequisites
 
