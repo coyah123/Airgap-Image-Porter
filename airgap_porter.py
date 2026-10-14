@@ -307,6 +307,13 @@ class App(tk.Tk):
         ttk.Button(row, text="⚙ Environment / creds",
                    command=self._toggle_env_panel).pack(side="right", padx=(0, 6))
 
+        # Persistent login status (stays until the next attempt), so you can tell
+        # at a glance whether the last registry login actually succeeded.
+        ttk.Label(row, text="   Status:").pack(side="right")
+        self.login_status_lbl = tk.Label(row, text="not logged in this session",
+                                          fg="#999", font=("", 9, "bold"))
+        self.login_status_lbl.pack(side="right")
+
         self.login_cmd = scrolledtext.ScrolledText(f, height=4, wrap="word",
                                                    font=("Consolas", 9))
         self.login_cmd.pack(fill="x", pady=(6, 0))
@@ -452,6 +459,7 @@ class App(tk.Tk):
         # can tell whether the token command or docker itself failed.
         piped = docker_ops.split_piped_login(cmd)
         if piped:
+            self._last_login_target = docker_ops.login_target(piped[1])
             self._run_piped_login(*piped)
             return
         # If this is a plain `docker login` with no password, docker would try to
@@ -474,6 +482,7 @@ class App(tk.Tk):
                          "info")
             return
         # Login fetches/sets creds locally — run it directly (not via the plan).
+        self._last_login_target = docker_ops.login_target(cmd)
         self._run_now([("registry login", cmd, None)], after=self._login_result)
 
     def _submit_login_creds(self):
@@ -483,6 +492,7 @@ class App(tk.Tk):
             self._notify("Password is empty.", "warn")
             return
         user = self.cred_user_var.get().strip()
+        self._last_login_target = docker_ops.login_target(self._pending_login_cmd)
         # Run as an argv list (not a shell string) so the username is a discrete
         # argument and can't be parsed as shell syntax; password goes on stdin.
         cmd = docker_ops.build_login_argv(self._pending_login_cmd, user)
@@ -547,11 +557,23 @@ class App(tk.Tk):
 
     def _login_result(self):
         """Explicit pass/fail feedback after a login job finishes (inline)."""
+        target = getattr(self, "_last_login_target", "")
         if getattr(self, "_last_job_failed", False):
+            self._set_login_status(False, target)
             self._notify("Login FAILED — check the registry, username, and password "
                          "in the Output pane above.", "error")
         else:
+            self._set_login_status(True, target)
             self._notify("Login succeeded.", "ok")
+
+    def _set_login_status(self, ok: bool, target: str = ""):
+        """Update the persistent login indicator in the login bar."""
+        if ok:
+            self.login_status_lbl.config(
+                text=f"✓ logged in{(' to ' + target) if target else ''}", fg="#2e9e44")
+        else:
+            self.login_status_lbl.config(
+                text=f"✗ login failed{(' for ' + target) if target else ''}", fg="#d33")
 
     # -- Pull & Save tab ----------------------------------------------------
     def _build_pull_tab(self):

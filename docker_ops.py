@@ -288,6 +288,42 @@ def split_piped_login(command: str):
     return prod, login
 
 
+_VALUE_FLAGS = {"-u", "--username", "-p", "--password", "--name", "-r", "--region"}
+_LOGIN_WORDS = {"docker", "podman", "nerdctl", "helm", "aws", "az", "login",
+                "registry", "ecr", "acr", "get-login-password"}
+
+
+def login_target(command) -> str:
+    """Best-effort registry/host to display for a login (argv list or string).
+
+    `docker login myreg -u u`            -> "myreg"
+    `az acr login --name myacr`          -> "myacr"
+    `docker login --password-stdin r.io` -> "r.io"
+    Returns "" when nothing recognizable is left.
+    """
+    try:
+        toks = command if isinstance(command, list) else shlex.split(command, posix=True)
+    except ValueError:
+        return ""
+    # `az acr login --name X` names the registry explicitly.
+    for i, t in enumerate(toks):
+        if t == "--name" and i + 1 < len(toks):
+            return toks[i + 1]
+    positionals, skip = [], False
+    for t in toks:
+        if skip:
+            skip = False
+            continue
+        if t in _VALUE_FLAGS:
+            skip = True
+            continue
+        if t.startswith("-"):
+            continue
+        positionals.append(t)
+    tail = [p for p in positionals if p.lower() not in _LOGIN_WORDS]
+    return tail[-1] if tail else (positionals[-1] if positionals else "")
+
+
 def build_login_argv(command: str, username: str = "") -> list[str]:
     """Turn a passwordless login *command string* into an argv list to exec.
 
