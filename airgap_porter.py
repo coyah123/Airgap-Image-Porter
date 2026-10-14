@@ -33,7 +33,7 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, scrolledtext, ttk
 
 import docker_ops
 import helm_ops
@@ -304,6 +304,36 @@ class App(tk.Tk):
         ttk.Label(f, text="Runs through your shell. Saved profiles live in "
                   f"{login_store.STORE_PATH} (may contain secrets — keep it private).",
                   foreground="#777").pack(anchor="w", pady=(4, 0))
+
+        # Inline credentials panel — shown in-window (not as a modal popup) only
+        # when a login lacks a password. Locked-down/secure environments may block
+        # popup windows, so everything stays inside the main window.
+        self._pending_login_cmd = None
+        self.cred_frame = ttk.Frame(f)
+        self.cred_user_var = tk.StringVar()
+        self.cred_pw_var = tk.StringVar()
+        ttk.Label(self.cred_frame,
+                  text="Credentials needed for this login (used once, never saved):",
+                  foreground="#b06000").grid(row=0, column=0, columnspan=3,
+                                             sticky="w", pady=(2, 4))
+        self.cred_user_lbl = ttk.Label(self.cred_frame, text="Username:")
+        self.cred_user_entry = ttk.Entry(self.cred_frame,
+                                         textvariable=self.cred_user_var, width=26)
+        self.cred_user_lbl.grid(row=1, column=0, sticky="e", padx=(0, 4), pady=2)
+        self.cred_user_entry.grid(row=1, column=1, sticky="w", pady=2)
+        ttk.Label(self.cred_frame, text="Password:").grid(
+            row=2, column=0, sticky="e", padx=(0, 4), pady=2)
+        self.cred_pw_entry = ttk.Entry(self.cred_frame, textvariable=self.cred_pw_var,
+                                       width=26, show="•")
+        self.cred_pw_entry.grid(row=2, column=1, sticky="w", pady=2)
+        self.cred_pw_entry.bind("<Return>", lambda _e: self._submit_login_creds())
+        cb = ttk.Frame(self.cred_frame)
+        cb.grid(row=2, column=2, sticky="w", padx=(10, 0))
+        ttk.Button(cb, text="Continue", style="Accent.TButton",
+                   command=self._submit_login_creds).pack(side="left")
+        ttk.Button(cb, text="Cancel",
+                   command=self._cancel_login_creds).pack(side="left", padx=(6, 0))
+        # Hidden until needed.
         self._reload_profiles()
 
     def _login_command_text(self) -> str:
@@ -331,111 +361,90 @@ class App(tk.Tk):
         name = self.profile_name_var.get().strip() or self.profile_var.get().strip()
         cmd = self._login_command_text()
         if not name:
-            messagebox.showwarning("Save login", "Give the login a name first.")
+            self._notify("Give the login a name first.", "warn")
             return
         if not cmd:
-            messagebox.showwarning("Save login", "Nothing to save — paste a command.")
+            self._notify("Nothing to save — paste a command.", "warn")
             return
         login_store.upsert(name, cmd)
         self._reload_profiles(select=name)
-        self._log(f"✓ saved login profile “{name}”.")
+        self._notify(f"Saved login profile “{name}”.", "ok")
 
     def _delete_profile(self):
         name = self.profile_var.get().strip()
         if not name:
             return
-        if messagebox.askyesno("Delete login", f"Delete saved login “{name}”?"):
-            login_store.delete(name)
-            self.profile_var.set("")
-            self._reload_profiles()
+        # Two-step confirm (no popup): first click arms it, a second click within
+        # ~4s actually deletes. Avoids a modal askyesno dialog.
+        if getattr(self, "_delete_armed", None) != name:
+            self._delete_armed = name
+            self._notify(f"Click Delete again to remove saved login “{name}”.", "warn")
+            self.after(4000, lambda: setattr(self, "_delete_armed", None))
+            return
+        self._delete_armed = None
+        login_store.delete(name)
+        self.profile_var.set("")
+        self._reload_profiles()
+        self._notify(f"Deleted saved login “{name}”.", "ok")
 
     def _do_login(self):
         cmd = self._login_command_text()
         if not cmd:
-            messagebox.showwarning("Login", "Paste a login command first.")
+            self._notify("Paste a login command first.", "warn")
             return
-        stdin_text = None
         # If this is a plain `docker login` with no password, docker would try to
-        # prompt on a TTY we don't have — so ask here and feed it on stdin. The
-        # prompted password is used once and never written to the saved profile.
+        # prompt on a TTY we don't have — so reveal the inline credentials panel
+        # and run the login when the user presses Continue (no modal popup).
         if docker_ops.login_needs_password(cmd):
-            creds = self._prompt_credentials(
-                need_user=not docker_ops.login_has_username(cmd))
-            if creds is None:
-                self._log("Login cancelled.")
-                return
-            user, pw = creds
-            if not pw:
-                messagebox.showwarning("Login", "Password is empty.")
-                return
-            # Run as an argv list (not a shell string) so the username is a
-            # discrete argument and can't be parsed as shell syntax.
-            cmd = docker_ops.build_login_argv(cmd, user)
-            stdin_text = pw + "\n"
+            self._pending_login_cmd = cmd
+            need_user = not docker_ops.login_has_username(cmd)
+            self.cred_user_var.set("")
+            self.cred_pw_var.set("")
+            if need_user:
+                self.cred_user_lbl.grid()
+                self.cred_user_entry.grid()
+            else:
+                self.cred_user_lbl.grid_remove()
+                self.cred_user_entry.grid_remove()
+            self.cred_frame.pack(fill="x", pady=(6, 0))
+            (self.cred_user_entry if need_user else self.cred_pw_entry).focus_set()
+            self._notify("This login has no password — enter it below, then Continue.",
+                         "info")
+            return
         # Login fetches/sets creds locally — run it directly (not via the plan).
+        self._run_now([("registry login", cmd, None)], after=self._login_result)
+
+    def _submit_login_creds(self):
+        """Run the pending login using the inline username/password fields."""
+        pw = self.cred_pw_var.get()
+        if not pw:
+            self._notify("Password is empty.", "warn")
+            return
+        user = self.cred_user_var.get().strip()
+        # Run as an argv list (not a shell string) so the username is a discrete
+        # argument and can't be parsed as shell syntax; password goes on stdin.
+        cmd = docker_ops.build_login_argv(self._pending_login_cmd, user)
+        stdin_text = pw + "\n"
+        self.cred_pw_var.set("")   # don't retain the password in the widget
+        self.cred_user_var.set("")
+        self.cred_frame.pack_forget()
+        self._pending_login_cmd = None
         self._run_now([("registry login", cmd, stdin_text)], after=self._login_result)
 
+    def _cancel_login_creds(self):
+        self.cred_pw_var.set("")
+        self.cred_user_var.set("")
+        self.cred_frame.pack_forget()
+        self._pending_login_cmd = None
+        self._notify("Login cancelled.", "info")
+
     def _login_result(self):
-        """Explicit pass/fail feedback after a login job finishes."""
+        """Explicit pass/fail feedback after a login job finishes (inline)."""
         if getattr(self, "_last_job_failed", False):
-            self._log("✗ Login FAILED — see the output above.")
-            messagebox.showerror("Login failed",
-                                 "Docker rejected the login. Check the registry, "
-                                 "username, and password in the Output pane.")
+            self._notify("Login FAILED — check the registry, username, and password "
+                         "in the Output pane above.", "error")
         else:
-            self._log("✓ Login succeeded.")
-            messagebox.showinfo("Login", "Login succeeded.")
-
-    def _prompt_credentials(self, need_user: bool):
-        """Modal dialog for a missing username/password. Returns (user, pw) or None.
-
-        The password field is masked and the value is returned only — never
-        stored. Cancel (or closing the window) returns None.
-        """
-        dlg = tk.Toplevel(self)
-        dlg.title("Docker login")
-        dlg.transient(self)
-        dlg.resizable(False, False)
-        dlg.grab_set()
-        frm = ttk.Frame(dlg, padding=14)
-        frm.pack(fill="both", expand=True)
-        ttk.Label(frm, text="Enter credentials for this login.\n"
-                  "The password is used once and is never saved.",
-                  foreground="#555").grid(row=0, column=0, columnspan=2,
-                                          sticky="w", pady=(0, 10))
-        user_var, pw_var = tk.StringVar(), tk.StringVar()
-        result = {}
-        r = 1
-        user_entry = None
-        if need_user:
-            ttk.Label(frm, text="Username:").grid(row=r, column=0, sticky="e",
-                                                  padx=(0, 6), pady=3)
-            user_entry = ttk.Entry(frm, textvariable=user_var, width=30)
-            user_entry.grid(row=r, column=1, sticky="we", pady=3)
-            r += 1
-        ttk.Label(frm, text="Password:").grid(row=r, column=0, sticky="e",
-                                              padx=(0, 6), pady=3)
-        pw_entry = ttk.Entry(frm, textvariable=pw_var, width=30, show="•")
-        pw_entry.grid(row=r, column=1, sticky="we", pady=3)
-        r += 1
-        btns = ttk.Frame(frm)
-        btns.grid(row=r, column=0, columnspan=2, sticky="e", pady=(12, 0))
-
-        def _ok():
-            result["user"], result["pw"] = user_var.get().strip(), pw_var.get()
-            dlg.destroy()
-
-        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(
-            side="right", padx=(6, 0))
-        ttk.Button(btns, text="🔑 Log in", command=_ok,
-                   style="Accent.TButton").pack(side="right")
-        pw_entry.bind("<Return>", lambda _e: _ok())
-        (user_entry or pw_entry).focus_set()
-        self.update_idletasks()
-        dlg.wait_window()
-        if "pw" not in result:
-            return None
-        return result["user"], result["pw"]
+            self._notify("Login succeeded.", "ok")
 
     # -- Pull & Save tab ----------------------------------------------------
     def _build_pull_tab(self):
@@ -511,7 +520,7 @@ class App(tk.Tk):
                 self.images_txt.delete("1.0", "end")
                 self.images_txt.insert("1.0", Path(path).read_text(encoding="utf-8"))
             except OSError as e:
-                messagebox.showerror("Load list", str(e))
+                self._notify(f"Load list failed: {e}", "error")
 
     def _browse_outdir(self):
         d = filedialog.askdirectory(title="Output folder for .tar files")
@@ -534,7 +543,7 @@ class App(tk.Tk):
     def _pull_and_save(self, pull: bool = True, save: bool = True):
         images = self._current_images()
         if not images:
-            messagebox.showwarning("No images", "Add at least one image reference.")
+            self._notify("Add at least one image reference.", "warn")
             return
         outdir = Path(self.outdir_var.get().strip() or ".")
         if save and self.subfolder_on.get():
@@ -550,7 +559,7 @@ class App(tk.Tk):
             try:
                 outdir.mkdir(parents=True, exist_ok=True)
             except OSError as e:
-                messagebox.showerror("Output folder", str(e))
+                self._notify(f"Output folder error: {e}", "error")
                 return
             if self.bundle_var.get() == "single":
                 name = self.bundle_name_var.get().strip() or "images-bundle.tar"
@@ -659,7 +668,7 @@ class App(tk.Tk):
     def _preview_reprefix(self):
         refs = self._selected_refs()
         if not refs:
-            messagebox.showinfo("Preview", "Select one or more images first.")
+            self._notify("Select one or more images first.", "warn")
             return
         prefix = self.prefix_var.get()
         keep = self.keep_old_reg_var.get()
@@ -670,11 +679,11 @@ class App(tk.Tk):
     def _reprefix_selected(self, push: bool):
         refs = self._selected_refs()
         if not refs:
-            messagebox.showwarning("Tag", "Select one or more images first.")
+            self._notify("Select one or more images first.", "warn")
             return
         prefix = self.prefix_var.get().strip()
         if not prefix:
-            messagebox.showwarning("Tag", "Enter a new prefix.")
+            self._notify("Enter a new prefix.", "warn")
             return
         keep = self.keep_old_reg_var.get()
         steps = []
@@ -688,7 +697,7 @@ class App(tk.Tk):
     def _push_selected(self):
         refs = [r for r in self._selected_refs() if ":" in r or "/" in r]
         if not refs:
-            messagebox.showwarning("Push", "Select named images (repo:tag) to push.")
+            self._notify("Select named images (repo:tag) to push.", "warn")
             return
         self._start([(f"push {r}", docker_ops.push_argv(r), None) for r in refs])
 
@@ -696,9 +705,8 @@ class App(tk.Tk):
         refs = self._selected_refs()
         if not refs:
             return
-        if not messagebox.askyesno("Remove",
-                                   f"Run `docker rmi` on {len(refs)} image(s)?"):
-            return
+        # No popup confirm: removals are staged into Preview / Run and only run
+        # when the user presses Run plan — that review step is the confirmation.
         self._start([(f"rmi {r}", docker_ops.rmi_argv(r), None) for r in refs],
                     after=self._refresh_images)
 
@@ -767,7 +775,7 @@ class App(tk.Tk):
         keep = self.keep_ns_var.get()
         imgs = self._push_images()
         if not imgs:
-            messagebox.showinfo("Preview", "No images listed.")
+            self._notify("No images listed.", "warn")
             return
         self._log("── retag preview ──")
         for ref in imgs:
@@ -776,7 +784,7 @@ class App(tk.Tk):
     def _do_load(self):
         raw = self.tars_var.get().strip()
         if not raw:
-            messagebox.showwarning("Load", "Pick one or more .tar files.")
+            self._notify("Pick one or more .tar files.", "warn")
             return
         steps = [(f"load {Path(p).name}", docker_ops.load_argv(p), None)
                  for p in raw.split(os.pathsep) if p]
@@ -785,11 +793,11 @@ class App(tk.Tk):
     def _do_retag_push(self):
         dest = self.dest_var.get().strip()
         if not dest:
-            messagebox.showwarning("Push", "Enter the destination registry.")
+            self._notify("Enter the destination registry.", "warn")
             return
         imgs = self._push_images()
         if not imgs:
-            messagebox.showwarning("Push", "List the images to retag & push.")
+            self._notify("List the images to retag & push.", "warn")
             return
         keep = self.keep_ns_var.get()
         steps = []
@@ -908,7 +916,7 @@ class App(tk.Tk):
         name = self.repo_name_var.get().strip()
         url = self.repo_url_var.get().strip()
         if not name or not url:
-            messagebox.showwarning("Add repo", "Enter both a name and a URL.")
+            self._notify("Enter both a repo name and a URL.", "warn")
             return
         self._run_now([(f"repo add {name}", helm_ops.repo_add_argv(name, url), None)],
                       after=self._refresh_repos)
@@ -920,7 +928,7 @@ class App(tk.Tk):
     def _search_charts(self):
         kw = self.helm_query_var.get().strip()
         if not kw:
-            messagebox.showinfo("Search", "Enter a chart name or keyword.")
+            self._notify("Enter a chart name or keyword.", "warn")
             return
         self.status.config(text=f"Searching charts for “{kw}”…")
         threading.Thread(target=self._search_worker, args=(kw,), daemon=True).start()
@@ -947,13 +955,13 @@ class App(tk.Tk):
     def _pull_charts(self):
         sel = self._selected_charts()
         if not sel:
-            messagebox.showwarning("Pull chart", "Select one or more chart versions.")
+            self._notify("Select one or more chart versions.", "warn")
             return
         dest = self.chartdir_var.get().strip() or "."
         try:
             Path(dest).mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            messagebox.showerror("Charts folder", str(e))
+            self._notify(f"Charts folder error: {e}", "error")
             return
         steps = []
         for r in sel:
@@ -964,7 +972,7 @@ class App(tk.Tk):
     def _list_chart_images(self):
         sel = self._selected_charts()
         if not sel:
-            messagebox.showwarning("List images", "Select a chart version first.")
+            self._notify("Select a chart version first.", "warn")
             return
         self.status.config(text="Rendering chart(s) to find images…")
         threading.Thread(target=self._chart_images_worker, args=(sel,),
@@ -996,7 +1004,7 @@ class App(tk.Tk):
         tgz = self.chart_tgz_var.get().strip()
         target = self.oci_target_var.get().strip()
         if not tgz or not target:
-            messagebox.showwarning("Push chart", "Pick a .tgz and an oci:// target.")
+            self._notify("Pick a .tgz and an oci:// target.", "warn")
             return
         self._start([(f"push {Path(tgz).name} → {target}",
                       helm_ops.push_argv(tgz, target), None)])
@@ -1107,7 +1115,7 @@ class App(tk.Tk):
             else:
                 subprocess.Popen(["xdg-open", str(folder)])
         except OSError as e:
-            messagebox.showerror("Open", str(e))
+            self._notify(f"Open failed: {e}", "error")
 
     # -- Preview / Run tab (dry-run staging — nothing runs until confirmed) -
     def _build_preview_tab(self):
@@ -1160,7 +1168,7 @@ class App(tk.Tk):
 
     def _run_plan(self):
         if self.runner.busy:
-            messagebox.showinfo("Busy", "A job is already running.")
+            self._notify("A job is already running — wait for it to finish.", "warn")
             return
         if not self._pending_steps:
             return
@@ -1179,7 +1187,7 @@ class App(tk.Tk):
         gate is reserved for the things that actually pull/push/produce artifacts.
         """
         if self.runner.busy:
-            messagebox.showinfo("Busy", "A job is already running.")
+            self._notify("A job is already running — wait for it to finish.", "warn")
             return
         if not steps:
             return
@@ -1211,6 +1219,16 @@ class App(tk.Tk):
         self.log.see("end")
         self.log.config(state="disabled")
 
+    def _notify(self, msg: str, level: str = "info"):
+        """Inline feedback (replaces modal popups): log line + status label.
+
+        `level` ∈ {info, ok, warn, error} just picks a leading glyph so warnings
+        and errors stand out in the Output pane without needing a popup window.
+        """
+        icon = {"info": "ℹ", "ok": "✓", "warn": "⚠", "error": "✗"}.get(level, "ℹ")
+        self._log(f"{icon} {msg}")
+        self.status.config(text=msg)
+
     def _set_busy(self, busy: bool):
         state = "disabled" if busy else "normal"
         for b in self._action_btns:
@@ -1227,7 +1245,7 @@ class App(tk.Tk):
         callable run once the plan completes (e.g. refresh the image list).
         """
         if self.runner.busy:
-            messagebox.showinfo("Busy", "A job is already running.")
+            self._notify("A job is already running — wait for it to finish.", "warn")
             return
         if not steps:
             return
