@@ -927,14 +927,10 @@ class App(tk.Tk):
         if src == dst:
             self._notify("Current and new tags are the same.", "warn")
             return
-        self._run_now([(f"tag {src} → {dst}", docker_ops.tag_argv(src, dst), None)],
-                      after=self._quick_tag_done)
-
-    def _quick_tag_done(self):
-        if not getattr(self, "_last_job_failed", False):
-            self._notify(f"Tagged → {self.qtag_dst_var.get().strip()}", "ok")
-            self.qtag_dst_var.set("")
-        self._refresh_images()
+        # Stage into Preview / Run like the other tag actions — nothing runs until
+        # the user reviews and presses Run plan.
+        self._start([(f"tag {src} → {dst}", docker_ops.tag_argv(src, dst), None)],
+                    after=self._refresh_images)
 
     def _push_selected(self):
         refs = [r for r in self._selected_refs() if ":" in r or "/" in r]
