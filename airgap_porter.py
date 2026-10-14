@@ -191,19 +191,28 @@ class App(tk.Tk):
         """
         bar = ttk.Frame(self, padding=(10, 6), style="Status.TFrame")
         bar.pack(fill="x", padx=8, pady=(8, 0))
+
+        # Row 1: the dot + status text. Row 2: the Refresh button underneath, so
+        # it's always visible even when the window is narrow (a right-anchored
+        # button on the same row gets clipped off-screen when the window shrinks).
+        row1 = ttk.Frame(bar, style="Status.TFrame")
+        row1.pack(fill="x")
         # Classic tk.Label so we can recolor the dot directly (ttk theming the
         # foreground of a single glyph is fiddly under 'clam').
-        self.docker_dot = tk.Label(bar, text="●", font=("", 15), fg="#999",
+        self.docker_dot = tk.Label(row1, text="●", font=("", 15), fg="#999",
                                    bg="#f4f6f9")
         self.docker_dot.pack(side="left")
-        self.docker_status_lbl = ttk.Label(bar, text="Checking Docker…",
+        self.docker_status_lbl = ttk.Label(row1, text="Checking Docker…",
                                             font=("", 10, "bold"))
         self.docker_status_lbl.pack(side="left", padx=(6, 0))
-        self.docker_detail_lbl = ttk.Label(bar, text="", foreground="#777")
+        self.docker_detail_lbl = ttk.Label(row1, text="", foreground="#777")
         self.docker_detail_lbl.pack(side="left", padx=(12, 0))
-        self.docker_refresh_btn = ttk.Button(bar, text="⟳ Refresh",
+
+        row2 = ttk.Frame(bar, style="Status.TFrame")
+        row2.pack(fill="x", pady=(6, 0))
+        self.docker_refresh_btn = ttk.Button(row2, text="⟳ Refresh",
                                               command=self._refresh_docker_status)
-        self.docker_refresh_btn.pack(side="right")
+        self.docker_refresh_btn.pack(side="left")
 
     def _refresh_docker_status(self):
         """Re-check the daemon on a background thread (amber dot meanwhile)."""
