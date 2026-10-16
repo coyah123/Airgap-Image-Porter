@@ -38,6 +38,7 @@ from tkinter import filedialog, scrolledtext, ttk
 
 import docker_ops
 import env_store
+import tar_map
 import helm_ops
 import login_store
 import prefix_store
@@ -206,14 +207,37 @@ class App(tk.Tk):
         """
         bar = ttk.Frame(self, padding=(10, 6), style="Status.TFrame")
         bar.pack(fill="x", padx=8, pady=(8, 0))
+        self.conn_bar = bar
 
-        # Row 1: the dot + status text. Row 2: the Refresh button underneath, so
-        # it's always visible even when the window is narrow (a right-anchored
-        # button on the same row gets clipped off-screen when the window shrinks).
-        row1 = ttk.Frame(bar, style="Status.TFrame")
+        # Header row — ALWAYS visible. Carries the collapse toggle, a compact row
+        # of mini status dots (so green/red is readable even when collapsed), and
+        # the Refresh button. Everything else lives in `conn_body` below, which
+        # the toggle hides to reclaim space once you're connected & logged in.
+        header = ttk.Frame(bar, style="Status.TFrame")
+        header.pack(fill="x")
+        self.conn_toggle_btn = ttk.Button(header, text="▾ Connections", width=18,
+                                           command=self._toggle_connections)
+        self.conn_toggle_btn.pack(side="left")
+
+        # Compact dots (docker daemon / docker registry / helm registry). Classic
+        # tk.Label so the glyph colour can be set directly under 'clam'.
+        mini = ttk.Frame(header, style="Status.TFrame")
+        mini.pack(side="left", padx=(12, 0))
+        self.mini_docker_dot = self._mini_dot(mini, "Docker")
+        self.mini_reg_dot = self._mini_dot(mini, "Registry")
+        self.mini_helm_dot = self._mini_dot(mini, "Helm")
+
+        self.docker_refresh_btn = ttk.Button(header, text="⟳ Refresh",
+                                              command=self._refresh_docker_status)
+        self.docker_refresh_btn.pack(side="right")
+
+        # Collapsible body: detailed docker status + registry indicators. The
+        # login section (built next) is packed in here too, under these rows.
+        self.conn_body = ttk.Frame(bar, style="Status.TFrame")
+        self.conn_body.pack(fill="x", pady=(6, 0))
+
+        row1 = ttk.Frame(self.conn_body, style="Status.TFrame")
         row1.pack(fill="x")
-        # Classic tk.Label so we can recolor the dot directly (ttk theming the
-        # foreground of a single glyph is fiddly under 'clam').
         self.docker_dot = tk.Label(row1, text="●", font=("", 15), fg="#999",
                                    bg="#f4f6f9")
         self.docker_dot.pack(side="left")
@@ -222,38 +246,33 @@ class App(tk.Tk):
         self.docker_status_lbl.pack(side="left", padx=(6, 0))
         self.docker_detail_lbl = ttk.Label(row1, text="", foreground="#777")
         self.docker_detail_lbl.pack(side="left", padx=(12, 0))
-        # Toggle to collapse the connection details (they auto-collapse once a
-        # registry login succeeds, since they just take up space after that).
-        self.status_toggle_btn = ttk.Button(row1, text="▾ Hide details", width=14,
-                                             command=self._toggle_status_details)
-        self.status_toggle_btn.pack(side="right")
-
-        # Everything below lives in a collapsible body so it can be hidden.
-        self.status_body = ttk.Frame(bar, style="Status.TFrame")
-        self.status_body.pack(fill="x")
 
         # Registry connection indicators (reflect the last login this session):
         # one for Docker/OCI registries, one for Helm registries. Red until a
         # login succeeds, then green with the registry host.
         self.reg_dot, self.reg_lbl = self._make_conn_row(
-            self.status_body, "Docker registry")
+            self.conn_body, "Docker registry")
         self.helm_reg_dot, self.helm_reg_lbl = self._make_conn_row(
-            self.status_body, "Helm registry")
+            self.conn_body, "Helm registry")
 
-        row2 = ttk.Frame(self.status_body, style="Status.TFrame")
-        row2.pack(fill="x", pady=(6, 0))
-        self.docker_refresh_btn = ttk.Button(row2, text="⟳ Refresh",
-                                              command=self._refresh_docker_status)
-        self.docker_refresh_btn.pack(side="left")
+    def _mini_dot(self, parent, label: str):
+        """A small labelled status dot for the always-visible header."""
+        cell = ttk.Frame(parent, style="Status.TFrame")
+        cell.pack(side="left", padx=(0, 10))
+        dot = tk.Label(cell, text="●", font=("", 11), fg="#999", bg="#f4f6f9")
+        dot.pack(side="left")
+        ttk.Label(cell, text=label, foreground="#667085",
+                  font=("", 8)).pack(side="left", padx=(3, 0))
+        return dot
 
-    def _toggle_status_details(self):
-        """Collapse/expand the registry indicators + Refresh row."""
-        if self.status_body.winfo_manager():
-            self.status_body.pack_forget()
-            self.status_toggle_btn.config(text="▸ Show details")
+    def _toggle_connections(self):
+        """Collapse/expand the whole connection + login body."""
+        if self.conn_body.winfo_manager():
+            self.conn_body.pack_forget()
+            self.conn_toggle_btn.config(text="▸ Show connections")
         else:
-            self.status_body.pack(fill="x")
-            self.status_toggle_btn.config(text="▾ Hide details")
+            self.conn_body.pack(fill="x", pady=(6, 0))
+            self.conn_toggle_btn.config(text="▾ Connections")
 
     def _make_conn_row(self, parent, prefix: str):
         """A small dot + label row for a registry connection indicator."""
@@ -270,23 +289,27 @@ class App(tk.Tk):
         """Update the Docker or Helm registry indicator (kind ∈ {docker, helm})."""
         dot, lbl = ((self.helm_reg_dot, self.helm_reg_lbl) if kind == "helm"
                     else (self.reg_dot, self.reg_lbl))
+        mini = self.mini_helm_dot if kind == "helm" else self.mini_reg_dot
         prefix = lbl._prefix
         if ok:
             dot.config(fg="#2e9e44")
+            mini.config(fg="#2e9e44")
             lbl.config(text=f"{prefix}: connected — {target or 'logged in'}")
-            # Once logged in the details are just noise — collapse to reclaim space
+            # Once logged in the panel is just noise — collapse to reclaim space
             # (only the first time, so a manual re-open isn't fought on re-login).
             if not getattr(self, "_status_auto_collapsed", False):
                 self._status_auto_collapsed = True
-                if self.status_body.winfo_manager():
-                    self._toggle_status_details()
+                if self.conn_body.winfo_manager():
+                    self._toggle_connections()
         else:
             dot.config(fg="#d33")
+            mini.config(fg="#d33")
             lbl.config(text=f"{prefix}: login failed{(' — ' + target) if target else ''}")
 
     def _refresh_docker_status(self):
         """Re-check the daemon on a background thread (amber dot meanwhile)."""
         self.docker_dot.config(fg="#e0a800")
+        self.mini_docker_dot.config(fg="#e0a800")
         self.docker_status_lbl.config(text="Checking Docker…")
         self.docker_detail_lbl.config(text="")
         threading.Thread(target=self._docker_status_worker, daemon=True).start()
@@ -355,8 +378,11 @@ class App(tk.Tk):
         "#   export AWS_SESSION_TOKEN=...             (export/set/$env: prefixes all OK)")
 
     def _build_login_bar(self):
-        f = ttk.LabelFrame(self, text="Registry login", padding=8)
-        f.pack(fill="x", padx=8, pady=8)
+        # Lives inside the collapsible connections body, directly under the
+        # status indicators — so "Show connections" reveals login too, and
+        # collapsing reclaims all of it at once.
+        f = ttk.LabelFrame(self.conn_body, text="Registry login", padding=8)
+        f.pack(fill="x", pady=(8, 0))
 
         # Collapsible: a header row stays visible; everything else lives in
         # `login_body`, which can be hidden to reclaim space once you're logged in.
@@ -921,9 +947,25 @@ class App(tk.Tk):
             b.pack(side="left", padx=4)
             self._action_btns.append(b)
 
+    @staticmethod
+    def _filetypes(specs):
+        """Return filedialog filetypes that behave on macOS.
+
+        The native macOS Tk file panel grays out *every* file when given an
+        `("All", "*.*")` entry (and sometimes even with a plain extension
+        filter), so you can't pick the .tar you're staring at. Dropping the
+        extension filters there — allow-all — is the reliable fix. On Windows /
+        Linux we keep the convenience filters and append a real all-glob ("*",
+        not "*.*", which on mac means "names containing a dot").
+        """
+        if sys.platform == "darwin":
+            return [("All files", "*")]
+        return [*specs, ("All files", "*")]
+
     def _load_image_list(self):
         path = filedialog.askopenfilename(
-            title="Load image list", filetypes=[("Text", "*.txt"), ("All", "*.*")])
+            title="Load image list", filetypes=self._filetypes(
+                [("Text", "*.txt")]))
         if path:
             try:
                 self.images_txt.delete("1.0", "end")
@@ -954,12 +996,14 @@ class App(tk.Tk):
         if not images:
             self._notify("Add at least one image reference.", "warn")
             return
-        outdir = Path(self.outdir_var.get().strip() or ".")
+        base_outdir = Path(self.outdir_var.get().strip() or ".")
+        outdir = base_outdir
         if save and self.subfolder_on.get():
             name = self.subfolder_var.get().strip() or time.strftime("pull-%Y%m%d-%H%M%S")
             outdir = outdir / name
         platform = self.platform_var.get()
         steps = []
+        saved_tars: list[tuple[str, list[str]]] = []   # (tar path, images in it)
         if pull:
             for ref in images:
                 steps.append((f"pull {ref} ({platform})",
@@ -977,12 +1021,99 @@ class App(tk.Tk):
                 target = str(outdir / name)
                 steps.append((f"save {len(images)} image(s) → {name}",
                               docker_ops.save_argv(images, target), None))
+                saved_tars.append((target, list(images)))
             else:
                 for ref in images:
                     target = str(outdir / docker_ops.safe_filename(ref))
                     steps.append((f"save {ref} → {Path(target).name}",
                                   docker_ops.save_argv([ref], target), None))
-        self._start(steps, after=(self._refresh_files if save else None))
+                    saved_tars.append((target, [ref]))
+
+        def _after():
+            if save and saved_tars:
+                self._write_tar_map(base_outdir, saved_tars, platform)
+            self._refresh_files()
+
+        self._start(steps, after=(_after if save else None))
+
+    def _write_tar_map(self, base_outdir, saved_tars, platform):
+        """Record each freshly-saved tar → its image refs in the folder map.
+
+        Only tars that actually exist on disk are recorded, so a failed/half-run
+        plan doesn't write phantom entries. The map lives at the root output
+        folder so it covers every per-pull subfolder and travels with the tars.
+        """
+        wrote = 0
+        for target, imgs in saved_tars:
+            if Path(target).exists():
+                tar_map.record(base_outdir, target, imgs, platform)
+                wrote += 1
+        if wrote:
+            self._log(f"🗺  updated {tar_map.MAP_FILENAME} in {base_outdir} "
+                      f"({wrote} tar entr{'y' if wrote == 1 else 'ies'}).")
+            self._write_load_runbook(base_outdir)
+
+    def _write_load_runbook(self, base_outdir):
+        """(Re)generate the manual load/retag/push runbook from the folder map.
+
+        A fallback for the high side: if the Porter app won't run there, these
+        are the exact commands to load every tar and (template) retag + push.
+        Regenerated whole from the map each save, so it stays complete as the
+        folder grows. Also echoed to the Output log so it's visible right away.
+        Paths are relative to this folder — `cd` into it, then run top to bottom.
+        """
+        data = tar_map.load(base_outdir)
+        tars = data.get("tars", {})
+        if not tars:
+            return
+
+        lines = [
+            "# ============================================================",
+            "# Air-Gapped Image Porter — MANUAL LOAD RUNBOOK",
+            f"# generated {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            "#",
+            "# Use this on the high side if the Porter app won't run there.",
+            f"# cd into this folder first, then run the commands below.",
+            "# ============================================================",
+            "",
+            "# --- 1) Load every tar into the local docker ---------------",
+        ]
+        all_images: list[str] = []
+        for rel, entry in tars.items():
+            imgs = entry.get("images") or []
+            if imgs:
+                lines.append(f"#   {rel}: {', '.join(imgs)}")
+            lines.append(docker_ops.format_command(docker_ops.load_argv(rel)))
+            for im in imgs:
+                if im not in all_images:
+                    all_images.append(im)
+
+        lines += [
+            "",
+            "# --- 2) Retag for the destination registry & push ---------",
+            "#   Replace DEST_REGISTRY with your registry (e.g. myacr.azurecr.io),",
+            "#   log in first (docker login DEST_REGISTRY), then run these.",
+            "#   (Namespace kept; drop it by hand if you don't want it.)",
+        ]
+        for im in all_images:
+            dst = docker_ops.retag_for(im, "DEST_REGISTRY", keep_namespace=True)
+            lines.append(docker_ops.format_command(docker_ops.tag_argv(im, dst)))
+            lines.append(docker_ops.format_command(docker_ops.push_argv(dst)))
+            lines.append("")
+
+        text = "\n".join(lines).rstrip() + "\n"
+        path = Path(base_outdir) / tar_map.RUNBOOK_FILENAME
+        try:
+            path.write_text(text, encoding="utf-8")
+        except OSError as e:
+            self._log(f"⚠ could not write {tar_map.RUNBOOK_FILENAME}: {e}")
+            return
+        self._log(f"📝 wrote manual load runbook → {path}")
+        # Echo just the load section to the log so it's visible without opening
+        # the file (the retag/push half is templated and lives in the file).
+        self._log("── manual load commands (also saved to the runbook) ──")
+        for rel in tars:
+            self._log("   " + docker_ops.format_command(docker_ops.load_argv(rel)))
 
     # -- Images tab (view, mass re-prefix/tag, push, remove) ----------------
     def _build_images_tab(self):
@@ -1273,9 +1404,16 @@ class App(tk.Tk):
         ttk.Entry(tf, textvariable=self.tars_var).pack(
             side="left", fill="x", expand=True, padx=4)
         ttk.Button(tf, text="Browse…", command=self._browse_tars).pack(side="left")
+        ttk.Button(tf, text="🗺 Scan folder…", command=self._scan_tar_folder).pack(
+            side="left", padx=(4, 0))
         b = ttk.Button(tf, text="📥 Load tar(s)", command=self._do_load)
         b.pack(side="left", padx=4)
         self._action_btns.append(b)
+
+        ttk.Label(tab, text=f"“Scan folder” reads every .tar in a folder (and its "
+                  f"{tar_map.MAP_FILENAME} map, if present) and prefills the tars + the "
+                  "original image refs to retag below.", foreground="#777").pack(
+                      anchor="w", pady=(2, 0))
 
         dest = ttk.Frame(tab)
         dest.pack(fill="x", pady=(10, 2))
@@ -1306,9 +1444,27 @@ class App(tk.Tk):
 
     def _browse_tars(self):
         paths = filedialog.askopenfilenames(
-            title="Select tar file(s)", filetypes=[("Tar", "*.tar"), ("All", "*.*")])
+            title="Select tar file(s)", filetypes=self._filetypes([("Tar", "*.tar")]))
         if paths:
             self.tars_var.set(os.pathsep.join(paths))
+
+    def _scan_tar_folder(self):
+        """Pick a folder; prefill the tar list + image refs from its map/tars."""
+        folder = filedialog.askdirectory(title="Folder of .tar files to load")
+        if not folder:
+            return
+        result = tar_map.scan_folder(folder)
+        tars, images = result["tars"], result["images"]
+        if not tars:
+            self._notify(f"No .tar files found under {folder}.", "warn")
+            return
+        self.tars_var.set(os.pathsep.join(tars))
+        if images:
+            self.push_txt.delete("1.0", "end")
+            self.push_txt.insert("1.0", "\n".join(images) + "\n")
+        mapped = "from map" if tar_map.map_path(folder).exists() else "no map found"
+        self._notify(f"Found {len(tars)} tar(s), {len(images)} image ref(s) "
+                     f"({mapped}).", "ok")
 
     def _copy_from_pull(self):
         self.push_txt.delete("1.0", "end")
@@ -1609,7 +1765,7 @@ class App(tk.Tk):
 
     def _browse_tgz(self):
         p = filedialog.askopenfilename(title="Select chart .tgz",
-                                       filetypes=[("Helm chart", "*.tgz"), ("All", "*.*")])
+                                       filetypes=self._filetypes([("Helm chart", "*.tgz")]))
         if p:
             self.chart_tgz_var.set(p)
 
@@ -1883,11 +2039,13 @@ class App(tk.Tk):
                 kind, detail = self._status_q.get_nowait()
                 if kind == "up":
                     self.docker_dot.config(fg="#2e9e44")
+                    self.mini_docker_dot.config(fg="#2e9e44")
                     self.docker_status_lbl.config(text="Docker connected")
                     self.docker_detail_lbl.config(
                         text=f"server v{detail}  ·  {docker_ops.docker_path()}")
                 elif kind == "down":
                     self.docker_dot.config(fg="#d33")
+                    self.mini_docker_dot.config(fg="#d33")
                     self.docker_status_lbl.config(text="Docker not available")
                     self.docker_detail_lbl.config(text=detail)
                 elif kind == "env_ok":
