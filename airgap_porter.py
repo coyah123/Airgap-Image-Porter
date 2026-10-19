@@ -1629,6 +1629,10 @@ class App(tk.Tk):
         b = ttk.Button(act, text="🏷️ Retag & Push", command=self._do_retag_push)
         b.pack(side="left", padx=4)
         self._action_btns.append(b)
+        b = ttk.Button(act, text="🏷️ Retag only (no push)",
+                       command=self._do_retag_only)
+        b.pack(side="left", padx=4)
+        self._action_btns.append(b)
 
     def _browse_tars(self):
         paths = filedialog.askopenfilenames(
@@ -1685,12 +1689,40 @@ class App(tk.Tk):
             self._log(f"  {ref}  →  {docker_ops.retag_for(ref, dest, keep)}")
 
     def _do_load(self):
+        steps = self._load_steps()
+        if steps is None:
+            return
+        self._start(steps)
+
+    def _load_steps(self):
+        """Build `docker load` steps for the tar(s) box, or None if empty."""
         raw = self.tars_var.get().strip()
         if not raw:
             self._notify("Pick one or more .tar files.", "warn")
+            return None
+        return [(f"load {Path(p).name}", docker_ops.load_argv(p), None)
+                for p in raw.split(os.pathsep) if p]
+
+    def _do_retag_only(self):
+        """Load the tar(s) and retag locally for the destination — but don't push.
+
+        Lets you inspect the retagged images before committing to a push. With
+        "push as-is" on there's nothing to retag, so this is just the load.
+        """
+        steps = self._load_steps()
+        if steps is None:
             return
-        steps = [(f"load {Path(p).name}", docker_ops.load_argv(p), None)
-                 for p in raw.split(os.pathsep) if p]
+        if not self.push_asis_var.get():
+            dest = self.dest_var.get().strip()
+            if not dest:
+                self._notify("Enter the destination registry (or tick "
+                             "“Push as-is”).", "warn")
+                return
+            keep = self.keep_ns_var.get()
+            for ref in self._push_images():
+                dst = docker_ops.retag_for(ref, dest, keep)
+                steps.append((f"tag {ref} → {dst}",
+                              docker_ops.tag_argv(ref, dst), None))
         self._start(steps)
 
     def _do_retag_push(self):
