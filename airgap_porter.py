@@ -25,6 +25,7 @@ Threading rule (same as the K8s dashboard): docker never runs on the UI thread.
 """
 from __future__ import annotations
 
+import json
 import os
 import queue
 import shlex
@@ -38,6 +39,7 @@ from tkinter import filedialog, scrolledtext, ttk
 
 import docker_ops
 import env_store
+import sbom_ops
 import tar_map
 import helm_ops
 import login_store
@@ -938,6 +940,21 @@ class App(tk.Tk):
         self.bundle_name_var = tk.StringVar(value="images-bundle.tar")
         ttk.Entry(mode, textvariable=self.bundle_name_var, width=22).pack(side="left")
 
+        # SBOM: pull/generate an SPDX SBOM next to the tars. Syft stays optional
+        # (auto-detected); without it we still try the registry attestation.
+        sbr = ttk.Frame(tab)
+        sbr.pack(fill="x", pady=(6, 0))
+        self.sbom_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(sbr, text="Pull SBOM (SPDX JSON) for each image",
+                        variable=self.sbom_var).pack(side="left")
+        gens = sbom_ops.available_generators()
+        if gens:
+            note = f"using {', '.join(gens)} (or registry attestation)"
+        else:
+            note = ("no syft/trivy found — will pull a registry attestation if "
+                    "present, else skip")
+        ttk.Label(sbr, text=f"· {note}", foreground="#777").pack(side="left", padx=(6, 0))
+
         act = ttk.Frame(tab)
         act.pack(fill="x", pady=(10, 0))
         for text, cmd in (("⬇ Pull only", lambda: self._pull_and_save(save=False)),
@@ -1029,12 +1046,16 @@ class App(tk.Tk):
                                   docker_ops.save_argv([ref], target), None))
                     saved_tars.append((target, [ref]))
 
+        want_sbom = self.sbom_var.get()
+
         def _after():
             if save and saved_tars:
                 self._write_tar_map(base_outdir, saved_tars, platform)
+            if want_sbom:
+                self._collect_sboms(images, outdir, platform)
             self._refresh_files()
 
-        self._start(steps, after=(_after if save else None))
+        self._start(steps, after=(_after if (save or want_sbom) else None))
 
     def _write_tar_map(self, base_outdir, saved_tars, platform):
         """Record each freshly-saved tar → its image refs in the folder map.
@@ -1115,6 +1136,80 @@ class App(tk.Tk):
         for rel in tars:
             self._log("   " + docker_ops.format_command(docker_ops.load_argv(rel)))
 
+    def _collect_sboms(self, images, outdir, platform):
+        """Kick off SBOM collection on a background thread (never the UI thread).
+
+        syft/trivy shell out and the registry attestation fetch hits the network,
+        so none of it may run inline. Progress is logged via the status queue.
+        """
+        self._sq_line(f"🧾 collecting SBOM(s) for {len(images)} image(s) → {outdir}")
+        threading.Thread(target=self._sbom_worker,
+                         args=(list(images), Path(outdir), platform),
+                         daemon=True).start()
+
+    def _sq_line(self, msg: str):
+        """Log a line from any thread (drained on the UI thread)."""
+        self._status_q.put(("line", msg))
+
+    def _sbom_worker(self, images, outdir, platform):
+        try:
+            outdir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self._sq_line(f"⚠ SBOM folder error: {e}")
+            return
+        have_buildx = self._buildx_available()
+        for ref in images:
+            out_file = outdir / sbom_ops.sbom_filename(ref)
+            how = self._sbom_for(ref, out_file, platform, have_buildx)
+            if how:
+                self._sq_line(f"   ✓ SBOM ({how}) → {out_file.name}")
+            else:
+                self._sq_line(f"   ⚠ no SBOM for {ref} — none attached in the "
+                              "registry and no syft/trivy on PATH; skipped "
+                              "(pull itself unaffected).")
+
+    def _buildx_available(self) -> bool:
+        try:
+            code, _ = docker_ops.run_capture(sbom_ops.buildx_version_argv())
+            return code == 0
+        except FileNotFoundError:
+            return False
+
+    def _sbom_for(self, ref, out_file, platform, have_buildx) -> str | None:
+        """Produce one SPDX file for `ref`; return the method used, or None.
+
+        Tier order: syft → trivy (clean generation from the local image) →
+        buildx (a registry-attached attestation). First success wins.
+        """
+        if sbom_ops.syft_path():
+            code, out = docker_ops.run_capture(sbom_ops.syft_argv(ref, str(out_file)))
+            if code == 0 and out_file.exists() and out_file.stat().st_size > 0:
+                return "syft"
+            self._sq_line(f"   · syft failed for {ref}: "
+                          f"{(out or '').strip().splitlines()[-1] if out.strip() else code}")
+        if sbom_ops.trivy_path():
+            code, out = docker_ops.run_capture(sbom_ops.trivy_argv(ref, str(out_file)))
+            if code == 0 and out_file.exists() and out_file.stat().st_size > 0:
+                return "trivy"
+            self._sq_line(f"   · trivy failed for {ref}: "
+                          f"{(out or '').strip().splitlines()[-1] if out.strip() else code}")
+        if have_buildx:
+            try:
+                code, stdout, _ = docker_ops.run_capture_split(
+                    sbom_ops.buildx_sbom_argv(ref))
+            except FileNotFoundError:
+                code, stdout = 1, ""
+            if code == 0:
+                spdx = sbom_ops.extract_spdx(stdout, platform)
+                if spdx is not None:
+                    try:
+                        out_file.write_text(json.dumps(spdx, indent=2),
+                                            encoding="utf-8")
+                        return "registry attestation"
+                    except OSError as e:
+                        self._sq_line(f"   · could not write {out_file.name}: {e}")
+        return None
+
     # -- Images tab (view, mass re-prefix/tag, push, remove) ----------------
     def _build_images_tab(self):
         tab = self._screen("Local Images", "Local Images")
@@ -1160,6 +1255,41 @@ class App(tk.Tk):
         qb = ttk.Button(qt, text="🏷️ Tag", style="Accent.TButton", command=self._quick_tag)
         qb.pack(side="left", padx=(6, 0))
         self._action_btns.append(qb)
+
+        # --- save selected images to tar (for transport across the air gap) ---
+        save = ttk.LabelFrame(tab, text="Save selected image(s) to tar", padding=8)
+        save.pack(fill="x", pady=(6, 0))
+        srow = ttk.Frame(save)
+        srow.pack(fill="x")
+        ttk.Label(srow, text="Folder:").pack(side="left")
+        self.img_save_dir_var = tk.StringVar(value=str(Path.cwd() / "image-tars"))
+        ttk.Entry(srow, textvariable=self.img_save_dir_var).pack(
+            side="left", fill="x", expand=True, padx=4)
+        ttk.Button(srow, text="Browse…",
+                   command=lambda: self._browse_into(self.img_save_dir_var)).pack(
+                       side="left")
+
+        srow2 = ttk.Frame(save)
+        srow2.pack(fill="x", pady=(6, 0))
+        self.img_bundle_var = tk.StringVar(value="per-image")
+        ttk.Label(srow2, text="Save as:").pack(side="left")
+        ttk.Radiobutton(srow2, text="one tar per image", value="per-image",
+                        variable=self.img_bundle_var).pack(side="left", padx=6)
+        ttk.Radiobutton(srow2, text="one bundle tar (all selected)", value="single",
+                        variable=self.img_bundle_var).pack(side="left", padx=6)
+        ttk.Label(srow2, text="Bundle name:").pack(side="left", padx=(12, 2))
+        self.img_bundle_name_var = tk.StringVar(value="images-bundle.tar")
+        ttk.Entry(srow2, textvariable=self.img_bundle_name_var, width=22).pack(side="left")
+        self.img_sbom_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(srow2, text="+ SBOM (SPDX)",
+                        variable=self.img_sbom_var).pack(side="left", padx=(12, 0))
+        sb = ttk.Button(srow2, text="💾 Save selected as tar(s)",
+                        style="Accent.TButton", command=self._save_selected_images)
+        sb.pack(side="right")
+        self._action_btns.append(sb)
+        ttk.Label(save, text="Writes the same map + high-side runbook as Pull & Save, "
+                  "so the Load & Push side can prefill from this folder.",
+                  foreground="#777").pack(anchor="w", pady=(4, 0))
 
         # --- mass re-prefix controls ---
         box = ttk.LabelFrame(tab, text="Mass re-tag selected images with a new prefix",
@@ -1243,6 +1373,50 @@ class App(tk.Tk):
     def _selected_refs(self) -> list[str]:
         """The `ref` (repo:tag or image id) of each selected tree row."""
         return [iid.split("\x00", 1)[0] for iid in self.img_tree.selection()]
+
+    def _save_selected_images(self):
+        """Save the selected local images to tar(s) in the chosen folder.
+
+        Mirrors the save half of Pull & Save: honors the bundle/per-image choice
+        and writes the folder map + high-side runbook, so images already pulled
+        into docker can be ported the same way as a fresh pull.
+        """
+        refs = self._selected_refs()
+        if not refs:
+            self._notify("Select one or more images in the list first.", "warn")
+            return
+        base_outdir = Path(self.img_save_dir_var.get().strip() or ".")
+        try:
+            base_outdir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self._notify(f"Folder error: {e}", "error")
+            return
+        steps = []
+        saved_tars: list[tuple[str, list[str]]] = []
+        if self.img_bundle_var.get() == "single":
+            name = self.img_bundle_name_var.get().strip() or "images-bundle.tar"
+            if not name.endswith(".tar"):
+                name += ".tar"
+            target = str(base_outdir / name)
+            steps.append((f"save {len(refs)} image(s) → {name}",
+                          docker_ops.save_argv(refs, target), None))
+            saved_tars.append((target, list(refs)))
+        else:
+            for ref in refs:
+                target = str(base_outdir / docker_ops.safe_filename(ref))
+                steps.append((f"save {ref} → {Path(target).name}",
+                              docker_ops.save_argv([ref], target), None))
+                saved_tars.append((target, [ref]))
+
+        want_sbom = self.img_sbom_var.get()
+
+        def _after():
+            self._write_tar_map(base_outdir, saved_tars, platform="")
+            if want_sbom:
+                self._collect_sboms(refs, base_outdir, "")
+            self._refresh_files()
+
+        self._start(steps, after=_after)
 
     def _reload_prefix_profiles(self, select: str = ""):
         self._prefix_profiles = prefix_store.load()
@@ -2057,6 +2231,8 @@ class App(tk.Tk):
                     self._refresh_docker_status()
                 elif kind == "env_err":
                     self._notify(f"Environment not applied — {detail}", "error")
+                elif kind == "line":
+                    self._log(detail)
         except queue.Empty:
             pass
         # Drain the images-list worker too.
