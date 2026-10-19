@@ -1589,14 +1589,28 @@ class App(tk.Tk):
                   "original image refs to retag below.", foreground="#777").pack(
                       anchor="w", pady=(2, 0))
 
+        # Push as-is: skip retagging entirely and push each image to the exact
+        # repo:path:tag it was saved with (docker load already restored those
+        # tags from the tar). Disables the destination-registry controls.
+        asis = ttk.Frame(tab)
+        asis.pack(fill="x", pady=(10, 0))
+        self.push_asis_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(asis, text="Push as-is — keep original tags, no retag "
+                        "(pushes back to the exact path each image was saved with)",
+                        variable=self.push_asis_var,
+                        command=self._toggle_push_asis).pack(side="left")
+
         dest = ttk.Frame(tab)
-        dest.pack(fill="x", pady=(10, 2))
-        ttk.Label(dest, text="Destination registry (ACR):").pack(side="left")
+        dest.pack(fill="x", pady=(6, 2))
+        self.dest_lbl = ttk.Label(dest, text="Destination registry (ACR):")
+        self.dest_lbl.pack(side="left")
         self.dest_var = tk.StringVar(value="myregistry.azurecr.io")
-        ttk.Entry(dest, textvariable=self.dest_var, width=34).pack(side="left", padx=4)
+        self.dest_entry = ttk.Entry(dest, textvariable=self.dest_var, width=34)
+        self.dest_entry.pack(side="left", padx=4)
         self.keep_ns_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(dest, text="keep repo namespace",
-                        variable=self.keep_ns_var).pack(side="left", padx=6)
+        self.keep_ns_chk = ttk.Checkbutton(dest, text="keep repo namespace",
+                                            variable=self.keep_ns_var)
+        self.keep_ns_chk.pack(side="left", padx=6)
 
         ttk.Label(tab, text="Images to retag & push (one per line — usually the same "
                   "list you pulled):").pack(anchor="w", pady=(10, 2))
@@ -1647,13 +1661,25 @@ class App(tk.Tk):
     def _push_images(self) -> list[str]:
         return docker_ops.parse_images(self.push_txt.get("1.0", "end"))
 
+    def _toggle_push_asis(self):
+        """Grey out the destination-registry controls when pushing as-is."""
+        state = "disabled" if self.push_asis_var.get() else "normal"
+        self.dest_entry.config(state=state)
+        self.keep_ns_chk.config(state=state)
+        self.dest_lbl.config(foreground=("#aaa" if self.push_asis_var.get() else ""))
+
     def _preview_retags(self):
-        dest = self.dest_var.get().strip()
-        keep = self.keep_ns_var.get()
         imgs = self._push_images()
         if not imgs:
             self._notify("No images listed.", "warn")
             return
+        if self.push_asis_var.get():
+            self._log("── push preview (as-is, no retag) ──")
+            for ref in imgs:
+                self._log(f"  push {ref}")
+            return
+        dest = self.dest_var.get().strip()
+        keep = self.keep_ns_var.get()
         self._log("── retag preview ──")
         for ref in imgs:
             self._log(f"  {ref}  →  {docker_ops.retag_for(ref, dest, keep)}")
@@ -1668,13 +1694,19 @@ class App(tk.Tk):
         self._start(steps)
 
     def _do_retag_push(self):
+        imgs = self._push_images()
+        if not imgs:
+            self._notify("List the images to push.", "warn")
+            return
+        # Push as-is: docker load already restored each image's original tag, so
+        # just push it back to that exact path — no tag step, no dest registry.
+        if self.push_asis_var.get():
+            steps = [(f"push {ref}", docker_ops.push_argv(ref), None) for ref in imgs]
+            self._start(steps)
+            return
         dest = self.dest_var.get().strip()
         if not dest:
             self._notify("Enter the destination registry.", "warn")
-            return
-        imgs = self._push_images()
-        if not imgs:
-            self._notify("List the images to retag & push.", "warn")
             return
         keep = self.keep_ns_var.get()
         steps = []
